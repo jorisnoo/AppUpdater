@@ -6,8 +6,7 @@
 //
 
 import Foundation
-import class AppKit.NSBackgroundActivityScheduler
-import var AppKit.NSApp
+import AppKit
 @preconcurrency import Version
 import Path
 import OSLog
@@ -98,6 +97,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         case pathTraversalDetected
         case extractionTimeout
         case invalidURL(String)
+        case relaunchFailed
     }
     
     public func check(success: OnSuccess? = nil, fail: OnFail? = nil) {
@@ -115,13 +115,15 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     
     @MainActor
     public func install(_ appBundle: Bundle, success: OnSuccess? = nil, fail: OnFail? = nil) {
-        do {
-            try installThrowing(appBundle)
-            success?()
-            onInstallSuccess?()
-        } catch {
-            fail?(error)
-            onInstallFail?(error)
+        Task { @MainActor in
+            do {
+                try await installThrowing(appBundle)
+                success?()
+                onInstallSuccess?()
+            } catch {
+                fail?(error)
+                onInstallFail?(error)
+            }
         }
     }
 
@@ -221,14 +223,13 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    public func installThrowing(_ downloadedAppBundle: Bundle) throws {
+    public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
         trace("install start")
         let installedAppBundle = Bundle.main
         guard let exe = downloadedAppBundle.executable, exe.exists else {
             trace("invalid downloaded bundle")
             throw Error.invalidDownloadedBundle
         }
-        let finalExecutable = installedAppBundle.path/exe.relative(to: downloadedAppBundle.path)
 
         _ = try FileManager.default.replaceItemAt(
             installedAppBundle.bundleURL,
@@ -238,17 +239,25 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         )
         trace("bundle replaced")
 
-        let proc = Process()
-        if #available(OSX 10.13, *) {
-            proc.executableURL = finalExecutable.url
-        } else {
-            proc.launchPath = finalExecutable.string
-        }
-        proc.launch()
-        trace("launched new app")
+        let newAppURL = installedAppBundle.bundleURL
+        let launched = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Swift.Error>) in
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.createsNewApplicationInstance = true
 
-        // seems to work, though for sure, seems asking a lot for it to be reliable!
-        //TODO be reliable! Probably get an external applescript to ask us this one to quit then exec the new one
+            NSWorkspace.shared.openApplication(at: newAppURL, configuration: configuration) { app, error in
+                if let error = error {
+                    continuation.resume(throwing: error)
+                } else {
+                    continuation.resume(returning: app != nil)
+                }
+            }
+        }
+
+        guard launched else {
+            throw Error.relaunchFailed
+        }
+
+        trace("new app launched, terminating old instance")
         NSApp.terminate(self)
     }
     
