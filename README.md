@@ -6,7 +6,7 @@
 > This fork removes UI components and changelog localization to provide a lean,
 > headless update library. Bring your own UI.
 
-A simple app-updater for macOS, checks your GitHub releases for a binary asset and silently updates your app.
+A simple app-updater for macOS, checks your GitHub releases for a binary asset, downloads it, and provides a validated bundle ready for installation.
 
 ## Changes from Upstream
 
@@ -42,18 +42,68 @@ package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdate
 var appUpdater = AppUpdater(owner: "yourname", repo: "YourApp")
 ```
 
-### Check for Updates and Auto Download
+### Check for Updates
 ```swift
 appUpdater.check()
 ```
 
-### Manual Install
+This checks GitHub for new releases, downloads the asset if a newer version is found, validates the code signature, and transitions to the `.downloaded` state. It does **not** install the update automatically.
+
+### Install an Update
 ```swift
-appUpdater.install()
+// Get the bundle from the downloaded state
+if case .downloaded(_, _, let bundle) = appUpdater.state {
+    appUpdater.install(bundle)
+}
 ```
 
-### SwiftUI
-**AppUpdater is an ObservableObject**, can be used directly in SwiftUI to build your own update UI.
+The `install(_:)` method replaces the running app with the downloaded bundle and relaunches.
+
+## Update Flow
+
+AppUpdater uses a state machine to track progress:
+
+```
+.none → .newVersionDetected → .downloading → .downloaded
+```
+
+| State | Description |
+|-------|-------------|
+| `.none` | No update available or not yet checked |
+| `.newVersionDetected(release, asset)` | A newer version was found, download starting |
+| `.downloading(release, asset, fraction)` | Download in progress (0.0 to 1.0) |
+| `.downloaded(release, asset, bundle)` | Ready to install; bundle is validated |
+
+### SwiftUI Example
+
+```swift
+import SwiftUI
+import AppUpdater
+
+struct UpdateView: View {
+    @ObservedObject var updater: AppUpdater
+
+    var body: some View {
+        switch updater.state {
+        case .none:
+            Text("No updates available")
+        case .newVersionDetected(let release, _):
+            Text("Found \(release.tagName.description)")
+        case .downloading(_, _, let fraction):
+            ProgressView(value: fraction)
+        case .downloaded(let release, _, let bundle):
+            VStack {
+                Text("Ready to install \(release.tagName.description)")
+                Button("Install & Restart") {
+                    updater.install(bundle)
+                }
+            }
+        }
+    }
+}
+```
+
+**AppUpdater is an ObservableObject**, observe the `state` property to build your own update UI.
 
 ### Custom Proxy
 For those unable to normally access GitHub, you can implement a custom proxy:
