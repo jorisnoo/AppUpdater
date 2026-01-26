@@ -8,16 +8,6 @@
 
 A simple app-updater for macOS, checks your GitHub releases for a binary asset, downloads it, and provides a validated bundle ready for installation.
 
-## Changes from Upstream
-
-- Removed `AppUpdaterSettings` SwiftUI view
-- Removed `MarkdownUI` dependency
-- Removed changelog localization (`localizedChangelog()`, `preferredChangelogLanguages`)
-- Removed deprecated `downloadedAppBundle` property
-- Replaced `debugInfo` array with OSLog (filter "AppUpdater" in Console.app)
-- Added 34 unit tests
-- Simplified `ReleaseProvider` protocol (removed `fetchAssetData()`)
-
 ## Caveats
 
 * Assets must be named: `\(name)-\(semanticVersion).ext`. See [Semantic Version](https://github.com/mxcl/Version)
@@ -26,9 +16,8 @@ A simple app-updater for macOS, checks your GitHub releases for a binary asset, 
 ## Features
 
 * Full semantic versioning support: we understand alpha/beta etc.
-* We check that the code-sign identity of the download matches the running app before updating. So if you don't code-sign I'm not sure what would happen.
+* We check that the code-sign identity of the download matches the running app before updating.
 * We support zip files or tarballs.
-* We support a proxy parameter for those unable to normally access GitHub
 
 ## Usage
 
@@ -39,12 +28,23 @@ package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdate
 
 ### Initialize
 ```swift
-var appUpdater = AppUpdater(owner: "yourname", repo: "YourApp")
+let updater = AppUpdater(owner: "yourname", repo: "YourApp")
+```
+
+**Full initializer:**
+```swift
+let updater = AppUpdater(
+    owner: "yourname",
+    repo: "YourApp",
+    releasePrefix: "YourApp",      // defaults to repo name
+    interval: 24 * 60 * 60,        // background check interval in seconds
+    provider: GithubReleaseProvider()
+)
 ```
 
 ### Check for Updates
 ```swift
-appUpdater.check()
+updater.check()
 ```
 
 This checks GitHub for new releases, downloads the asset if a newer version is found, validates the code signature, and transitions to the `.downloaded` state. It does **not** install the update automatically.
@@ -52,8 +52,8 @@ This checks GitHub for new releases, downloads the asset if a newer version is f
 ### Install an Update
 ```swift
 // Get the bundle from the downloaded state
-if case .downloaded(_, _, let bundle) = appUpdater.state {
-    appUpdater.install(bundle)
+if case .downloaded(_, _, let bundle) = updater.state {
+    updater.install(bundle)
 }
 ```
 
@@ -104,11 +104,6 @@ struct UpdateView: View {
 ```
 
 **AppUpdater is an ObservableObject**, observe the `state` property to build your own update UI.
-
-### Custom Proxy
-For those unable to normally access GitHub, you can implement a custom proxy:
-
-**Proxy Implementation Reference Gist:** [github-api-proxy.js](https://gist.github.com/jorisnoo/69ef19899710d25c77a93e9b6e433c5b)
 
 ## Architecture
 

@@ -1,9 +1,9 @@
 import Foundation
 
 extension URLSession {
-    func dataTask(with convertible: URLRequestConvertible, urlTransform: URLTransform? = nil) async throws -> URLTaskResult? {
+    func dataTask(with convertible: URLRequestConvertible) async throws -> URLTaskResult? {
         return try await withCheckedThrowingContinuation { continuation in
-            dataTask(with: convertible.request.applying(urlTransform)) { data, response, err in
+            dataTask(with: convertible.request) { data, response, err in
                 guard let data, let response else {
                     continuation.resume(throwing: err ?? AUError.invalidCallingConvention)
                     return
@@ -13,8 +13,8 @@ extension URLSession {
         }
     }
 
-    func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL, urlTransform: URLTransform? = nil) async throws -> AsyncThrowingStream<DownloadingState, Error> {
-        let request = convertible.request.applying(urlTransform)
+    func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        let request = convertible.request
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
             Task(priority: .userInitiated) { [weak self] in

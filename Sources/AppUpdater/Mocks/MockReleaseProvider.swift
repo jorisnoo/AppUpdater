@@ -18,7 +18,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         self.simulatedDelay = simulatedDelay
     }
 
-    public func fetchReleases(owner: String, repo: String, urlTransform: URLTransform?) async throws -> [Release] {
+    public func fetchReleases(owner: String, repo: String) async throws -> [Release] {
         let data: Data
         switch source {
         case .bundled:
@@ -36,7 +36,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         return try JSONDecoder().decode([Release].self, from: data)
     }
 
-    public func download(asset: Release.Asset, to saveLocation: URL, urlTransform: URLTransform?) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+    public func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
         let steps = simulatedSteps
         let delay = simulatedDelay
         let assetName = asset.name

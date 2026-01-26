@@ -6,7 +6,7 @@ import Combine
 struct Runner {
     static func main() async {
         print("[MockRunner] Starting mock update check...")
-        let updater = AppUpdater(owner: "mock", repo: "mock", releasePrefix: "AppUpdaterExample", interval: 24*60*60, urlTransform: nil, provider: MockReleaseProvider())
+        let updater = AppUpdater(owner: "mock", repo: "mock", releasePrefix: "AppUpdaterExample", interval: 24*60*60, provider: MockReleaseProvider())
         updater.skipCodeSignValidation = true
 
         var cancellables = Set<AnyCancellable>()

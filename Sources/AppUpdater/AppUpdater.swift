@@ -16,7 +16,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         return "\(owner)/\(repo)"
     }
 
-    var urlTransform: URLTransform?
     public var provider: ReleaseProvider
 
     /// update state
@@ -49,11 +48,10 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         return URLSession(configuration: config)
     }()
 
-    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, urlTransform: URLTransform? = nil, provider: ReleaseProvider = GithubReleaseProvider()) {
+    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, provider: ReleaseProvider = GithubReleaseProvider()) {
         self.owner = owner
         self.repo = repo
         self.releasePrefix = releasePrefix ?? repo
-        self.urlTransform = urlTransform
         self.provider = provider
 
         activity = NSBackgroundActivityScheduler(identifier: "AppUpdater.\(Bundle.main.bundleIdentifier ?? "")")
@@ -125,7 +123,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         let currentVersion = Bundle.main.version
 
         trace("fetch releases")
-        let releases = try await provider.fetchReleases(owner: owner, repo: repo, urlTransform: urlTransform)
+        let releases = try await provider.fetchReleases(owner: owner, repo: repo)
         trace("fetched releases count:", releases.count)
 
         await notifyReleasesDidChange(releases)
@@ -160,7 +158,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
 
         let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
 
-        let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"), urlTransform: urlTransform)
+        let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"))
 
         var dst: URL? = nil
         for try await state in downloadState {
