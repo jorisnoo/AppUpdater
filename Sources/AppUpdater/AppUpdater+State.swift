@@ -1,10 +1,3 @@
-//
-//  File.swift
-//  
-//
-//  Created by lixindong on 2024/7/24.
-//
-
 import Foundation
 
 public extension AppUpdater {

@@ -6,7 +6,7 @@ final class MockReleaseProviderTests: XCTestCase {
 
     func testFetchReleasesFromBundled() async throws {
         let provider = MockReleaseProvider(source: .bundled)
-        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", proxy: nil)
+        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", urlTransform: nil)
 
         XCTAssertEqual(releases.count, 3)
         XCTAssertEqual(releases[0].tagName, Version(2, 0, 0))
@@ -34,7 +34,7 @@ final class MockReleaseProviderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: jsonURL) }
 
         let provider = MockReleaseProvider(source: .fileURL(jsonURL), mockFileName: "")
-        let releases = try await provider.fetchReleases(owner: "test", repo: "test", proxy: nil)
+        let releases = try await provider.fetchReleases(owner: "test", repo: "test", urlTransform: nil)
 
         XCTAssertEqual(releases.count, 1)
         XCTAssertEqual(releases[0].tagName, Version(5, 0, 0))
@@ -42,7 +42,7 @@ final class MockReleaseProviderTests: XCTestCase {
 
     func testReleasesAreSortedCorrectly() async throws {
         let provider = MockReleaseProvider(source: .bundled)
-        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", proxy: nil)
+        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", urlTransform: nil)
         let sorted = releases.sorted()
 
         XCTAssertEqual(sorted[0].tagName, Version(1, 1, 0))
@@ -53,7 +53,7 @@ final class MockReleaseProviderTests: XCTestCase {
 
     func testPrereleaseFiltering() async throws {
         let provider = MockReleaseProvider(source: .bundled)
-        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", proxy: nil)
+        let releases = try await provider.fetchReleases(owner: "example", repo: "AppUpdaterExample", urlTransform: nil)
         let stableReleases = releases.filter { !$0.prerelease }
 
         XCTAssertEqual(stableReleases.count, 2)
@@ -69,7 +69,7 @@ final class MockReleaseProviderTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let saveLocation = tempDir.appendingPathComponent("download.zip")
-        let stream = try await provider.download(asset: asset, to: saveLocation, proxy: nil)
+        let stream = try await provider.download(asset: asset, to: saveLocation, urlTransform: nil)
 
         var progressCount = 0
         var finishCount = 0

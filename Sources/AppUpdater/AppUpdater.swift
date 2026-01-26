@@ -1,14 +1,6 @@
-//
-//  AppUpdaterGithub.swift
-//  SecureYourClipboard
-//
-//  Created by lixindong on 2024/4/26.
-//
-
 import Foundation
 import AppKit
 @preconcurrency import Version
-import Path
 import OSLog
 
 public final class AppUpdater: ObservableObject, @unchecked Sendable {
@@ -24,7 +16,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         return "\(owner)/\(repo)"
     }
 
-    var proxy: URLRequestProxy?
+    var urlTransform: URLTransform?
     public var provider: ReleaseProvider
 
     /// update state
@@ -48,8 +40,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public var allowPrereleases = false
     /// Skip code signing validation (useful for mock/testing).
     public var skipCodeSignValidation = false
-
-    private var progressTimer: Timer? = nil
     
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.default
@@ -59,11 +49,11 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         return URLSession(configuration: config)
     }()
 
-    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, proxy: URLRequestProxy? = nil, provider: ReleaseProvider = GithubReleaseProvider()) {
+    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, urlTransform: URLTransform? = nil, provider: ReleaseProvider = GithubReleaseProvider()) {
         self.owner = owner
         self.repo = repo
         self.releasePrefix = releasePrefix ?? repo
-        self.proxy = proxy
+        self.urlTransform = urlTransform
         self.provider = provider
 
         activity = NSBackgroundActivityScheduler(identifier: "AppUpdater.\(Bundle.main.bundleIdentifier ?? "")")
@@ -135,7 +125,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         let currentVersion = Bundle.main.version
 
         trace("fetch releases")
-        let releases = try await provider.fetchReleases(owner: owner, repo: repo, proxy: proxy)
+        let releases = try await provider.fetchReleases(owner: owner, repo: repo, urlTransform: urlTransform)
         trace("fetched releases count:", releases.count)
 
         await notifyReleasesDidChange(releases)
@@ -166,31 +156,21 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     }
 
     private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle? {
-        aulog("notice: AppUpdater dry-run:", asset)
         trace("update start:", release.tagName.description, asset.name)
 
         let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
 
-        let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"), proxy: proxy)
+        let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"), urlTransform: urlTransform)
 
         var dst: URL? = nil
         for try await state in downloadState {
             switch state {
-            case .progress(let progress):
-                trace("downloading", Int(progress.fractionCompleted * 100), "%")
-                DispatchQueue.main.async {
-                    self.progressTimer?.invalidate()
-                    self.progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                        Task { @MainActor in
-                            self?.notifyStateChanged(newState: .downloading(release, asset, fraction: progress.fractionCompleted))
-                        }
-                    }
-                }
-            case .finished(let saveLocation, _):
+            case .progress(let fraction):
+                trace("downloading", Int(fraction * 100), "%")
+                await notifyStateChanged(newState: .downloading(release, asset, fraction: fraction))
+            case .finished(let saveLocation):
                 trace("download finished at", saveLocation.path)
                 dst = saveLocation
-                progressTimer?.invalidate()
-                progressTimer = nil
             }
         }
 
@@ -199,21 +179,16 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
             throw Error.downloadFailed
         }
 
-        aulog("notice: AppUpdater downloaded:", dst)
-
-        guard let unziped = try await unzip(dst, contentType: asset.content_type) else {
+        guard let unziped = try await unzip(dst, contentType: asset.contentType) else {
             trace("unzip failed")
             throw Error.unzipFailed
         }
-
-        aulog("notice: AppUpdater unziped", unziped)
 
         guard let downloadedAppBundle = Bundle(url: unziped) else {
             throw Error.invalidDownloadedBundle
         }
 
         if try await validateCodeSigning(.main, downloadedAppBundle) {
-            aulog("notice: AppUpdater validated", dst)
             trace("codesign validated ok")
             return downloadedAppBundle
         } else {
@@ -226,7 +201,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
         trace("install start")
         let installedAppBundle = Bundle.main
-        guard let exe = downloadedAppBundle.executable, exe.exists else {
+        guard let exe = downloadedAppBundle.executableURL, FileManager.default.fileExists(atPath: exe.path) else {
             trace("invalid downloaded bundle")
             throw Error.invalidDownloadedBundle
         }
@@ -273,53 +248,51 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
 }
 
 public struct Release: Decodable, Sendable {
-    let tag_name: Version
-    public var tagName: Version { tag_name }
-    
+    public let tagName: Version
     public let prerelease: Bool
-    public struct Asset: Decodable, Sendable {
-        public let name: String
-        let browser_download_url: URL
-        public var downloadUrl: URL { browser_download_url }
-        
-        let content_type: ContentType
-        public var contentType: ContentType { content_type }
-    }
     public let assets: [Asset]
     public let body: String
     public let name: String
-    
-    let html_url: String
-    public var htmlUrl: String { html_url }
-    
-    enum CodingKeys: CodingKey {
-        case tag_name
+    public let htmlUrl: String
+
+    public struct Asset: Decodable, Sendable {
+        public let name: String
+        public let downloadUrl: URL
+        public let contentType: ContentType
+
+        enum CodingKeys: String, CodingKey {
+            case name
+            case downloadUrl = "browser_download_url"
+            case contentType = "content_type"
+        }
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case tagName = "tag_name"
         case prerelease
         case assets
         case body
         case name
-        case html_url
+        case htmlUrl = "html_url"
     }
-    
+
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.tag_name = (try? container.decodeIfPresent(Version.self, forKey: .tag_name)) ?? .null
+        self.tagName = (try? container.decodeIfPresent(Version.self, forKey: .tagName)) ?? .null
         self.prerelease = try container.decode(Bool.self, forKey: .prerelease)
         self.assets = try container.decode([Release.Asset].self, forKey: .assets)
         self.body = try container.decode(String.self, forKey: .body)
         self.name = try container.decode(String.self, forKey: .name)
-        self.html_url = try container.decode(String.self, forKey: .html_url)
+        self.htmlUrl = try container.decode(String.self, forKey: .htmlUrl)
     }
 
     func viableAsset(forRelease releasePrefix: String) -> Asset? {
-        return assets.first(where: { (asset) -> Bool in
-            let prefix = "\(releasePrefix.lowercased())-\(tag_name)"
-            let name = (asset.name as NSString).deletingPathExtension.lowercased()
+        return assets.first { asset in
+            let prefix = "\(releasePrefix.lowercased())-\(tagName)"
+            let assetName = (asset.name as NSString).deletingPathExtension.lowercased()
             let fileExtension = (asset.name as NSString).pathExtension
 
-            aulog("name, content_type, prefix, fileExtension", name, asset.content_type, prefix, fileExtension)
-
-            switch (name, asset.content_type, fileExtension) {
+            switch (assetName, asset.contentType, fileExtension) {
             case ("\(prefix).tar", .tar, "tar"):
                 return true
             case (prefix, .zip, "zip"):
@@ -327,7 +300,7 @@ public struct Release: Decodable, Sendable {
             default:
                 return false
             }
-        })
+        }
     }
 }
 
@@ -350,29 +323,23 @@ public enum ContentType: Decodable, Sendable {
 
 extension Release: Comparable {
     public static func < (lhs: Release, rhs: Release) -> Bool {
-        return lhs.tag_name < rhs.tag_name
+        return lhs.tagName < rhs.tagName
     }
 
     public static func == (lhs: Release, rhs: Release) -> Bool {
-        return lhs.tag_name == rhs.tag_name
+        return lhs.tagName == rhs.tagName
     }
 }
 
 private extension Array where Element == Release {
     func findViableUpdate(appVersion: Version, releasePrefix: String, prerelease: Bool) throws -> (Release, Release.Asset)? {
-        aulog(appVersion, "releasePrefix:", releasePrefix, "prerelease", prerelease, "in", self)
-        
         let suitableReleases = prerelease ? self : filter { !$0.prerelease }
-        aulog("found releases", suitableReleases)
 
         guard let latestRelease = suitableReleases.sorted().last else { return nil }
-        aulog("latestRelease", latestRelease)
 
-        guard appVersion < latestRelease.tag_name else { throw AUError.cancelled }
-        aulog("\(appVersion) < \(latestRelease.tag_name)")
+        guard appVersion < latestRelease.tagName else { return nil }
 
         guard let asset = latestRelease.viableAsset(forRelease: releasePrefix) else { return nil }
-        aulog("found asset", latestRelease, asset)
 
         return (latestRelease, asset)
     }
@@ -381,11 +348,7 @@ private extension Array where Element == Release {
 private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
 
     let proc = Process()
-    if #available(OSX 10.13, *) {
-        proc.currentDirectoryURL = url.deletingLastPathComponent()
-    } else {
-        proc.currentDirectoryPath = url.deletingLastPathComponent().path
-    }
+    proc.currentDirectoryURL = url.deletingLastPathComponent()
 
     switch contentType {
     case .tar:
@@ -395,7 +358,7 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
         proc.launchPath = "/usr/bin/unzip"
         proc.arguments = [url.path]
     default:
-        throw AUError.badInput
+        throw AppUpdater.Error.unzipFailed
     }
 
     func validateExtractedContents(in directory: URL) throws {
@@ -455,9 +418,7 @@ public extension Bundle {
         }
         let result = errInfo.filter { $0.hasPrefix("Authority=") }
             .first.map { String($0.dropFirst(10)) }
-        
-        aulog("result \(result)")
-        
+
         return result
     }
 }

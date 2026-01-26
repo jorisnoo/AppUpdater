@@ -1,74 +1,37 @@
-//
-//  Process+Coroutine.swift
-//  SecureYourClipboard
-//
-//  Created by lixindong on 2024/4/26.
-//
-
 import Foundation
 
 extension Process {
     public func launching() async throws -> (out: Pipe, err: Pipe) {
-        let (stdout, stderr) = (Pipe(), Pipe())
+        let stdout = Pipe()
+        let stderr = Pipe()
 
         standardOutput = stdout
         standardError = stderr
 
-        if #available(OSX 10.13, *) {
-            try run()
-        } else if let path = launchPath, FileManager.default.isExecutableFile(atPath: path) {
-            launch()
-        } else {
-            throw ProcessError.notExecutable(launchPath)
-        }
+        try run()
 
-        stdout.fileHandleForReading.readDataToEndOfFile()
+        return try await withCheckedThrowingContinuation { continuation in
+            terminationHandler = { [stdout, stderr] process in
+                guard process.terminationReason == .exit, process.terminationStatus == 0 else {
+                    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+                    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
+                    let stdoutString = String(data: stdoutData, encoding: .utf8)
+                    let stderrString = String(data: stderrData, encoding: .utf8)
 
-        self.waitUntilExit()
+                    continuation.resume(throwing: ProcessError.execution(
+                        process: process,
+                        standardOutput: stdoutString,
+                        standardError: stderrString
+                    ))
+                    return
+                }
 
-        guard self.terminationReason == .exit, self.terminationStatus == 0 else {
-            let stdoutData = try? self.readDataFromPipe(stdout)
-            let stderrData = try? self.readDataFromPipe(stderr)
-
-            let stdoutString = stdoutData.flatMap { (data: Data) -> String? in String(data: data, encoding: .utf8) }
-            let stderrString = stderrData.flatMap { (data: Data) -> String? in String(data: data, encoding: .utf8) }
-
-            throw ProcessError.execution(process: self, standardOutput: stdoutString, standardError: stderrString)
-        }
-        return (stdout, stderr)
-    }
-
-    private func readDataFromPipe(_ pipe: Pipe) throws -> Data {
-        let handle = pipe.fileHandleForReading
-        defer { handle.closeFile() }
-
-        let fd = handle.fileDescriptor
-
-        let bufsize = 1024 * 8
-        let buf = UnsafeMutablePointer<UInt8>.allocate(capacity: bufsize)
-        defer { buf.deallocate() }
-
-        var data = Data()
-
-        while true {
-            let bytesRead = read(fd, buf, bufsize)
-
-            if bytesRead == 0 {
-                break
+                continuation.resume(returning: (stdout, stderr))
             }
-
-            if bytesRead < 0 {
-                throw POSIXError.Code(rawValue: errno).map { POSIXError($0) } ?? CocoaError(.fileReadUnknown)
-            }
-
-            data.append(buf, count: bytesRead)
         }
-
-        return data
     }
 
     public enum ProcessError: Error {
-        case notExecutable(String?)
         case execution(process: Process, standardOutput: String?, standardError: String?)
     }
 }
@@ -76,10 +39,6 @@ extension Process {
 extension Process.ProcessError: LocalizedError {
     public var errorDescription: String? {
         switch self {
-        case .notExecutable(let path?):
-            return "File not executable: \(path)"
-        case .notExecutable(nil):
-            return "No launch path specified"
         case .execution(process: let task, standardOutput: _, standardError: _):
             return "Failed executing: `\(task)` (\(task.terminationStatus))."
         }

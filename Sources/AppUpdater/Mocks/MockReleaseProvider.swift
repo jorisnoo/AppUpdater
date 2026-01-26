@@ -18,7 +18,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         self.simulatedDelay = simulatedDelay
     }
 
-    public func fetchReleases(owner: String, repo: String, proxy: URLRequestProxy?) async throws -> [Release] {
+    public func fetchReleases(owner: String, repo: String, urlTransform: URLTransform?) async throws -> [Release] {
         let data: Data
         switch source {
         case .bundled:
@@ -27,7 +27,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
             } else if let url = Bundle.module.url(forResource: (mockFileName as NSString).deletingPathExtension, withExtension: (mockFileName as NSString).pathExtension.isEmpty ? nil : (mockFileName as NSString).pathExtension) {
                 data = try Data(contentsOf: url)
             } else {
-                throw AUError.badInput
+                throw CocoaError(.fileNoSuchFile)
             }
         case .fileURL(let url):
             data = try Data(contentsOf: url)
@@ -36,7 +36,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         return try JSONDecoder().decode([Release].self, from: data)
     }
 
-    public func download(asset: Release.Asset, to saveLocation: URL, proxy: URLRequestProxy?) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+    public func download(asset: Release.Asset, to saveLocation: URL, urlTransform: URLTransform?) async throws -> AsyncThrowingStream<DownloadingState, Error> {
         let steps = simulatedSteps
         let delay = simulatedDelay
         let assetName = asset.name
@@ -46,16 +46,14 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
                 // Simulate progress
                 for i in 1...steps {
                     try await Task.sleep(nanoseconds: delay)
-                    let p = Progress(totalUnitCount: Int64(steps))
-                    p.completedUnitCount = Int64(i)
-                    continuation.yield(.progress(p))
+                    let fraction = Double(i) / Double(steps)
+                    continuation.yield(.progress(fractionCompleted: fraction))
                 }
 
                 // Materialize a mock zip at saveLocation if requested type is zip, otherwise tar
                 do {
                     try await MockReleaseProvider.createMockArchive(at: saveLocation, assetName: assetName)
-                    let rsp = URLResponse(url: saveLocation, mimeType: nil, expectedContentLength: -1, textEncodingName: nil)
-                    continuation.yield(.finished(saveLocation: saveLocation, response: rsp))
+                    continuation.yield(.finished(saveLocation: saveLocation))
                     continuation.finish()
                 } catch {
                     continuation.finish(throwing: error)

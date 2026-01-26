@@ -1,20 +1,9 @@
-//
-//  NSURLSession+Coroutine.swift
-//  SecureYourClipboard
-//
-//  Created by lixindong on 2024/4/26.
-//
-
 import Foundation
 
 extension URLSession {
-    typealias TaskResult = (data: Data?, response: URLResponse?)
-    
-    func dataTask(with convertible: URLRequestConvertible, proxy: URLRequestProxy? = nil) async throws -> URLTaskResult? {
-        aulog("dataTask", convertible, convertible.request.applyOrOriginal(proxy: proxy))
-        
+    func dataTask(with convertible: URLRequestConvertible, urlTransform: URLTransform? = nil) async throws -> URLTaskResult? {
         return try await withCheckedThrowingContinuation { continuation in
-            dataTask(with: convertible.request.applyOrOriginal(proxy: proxy)) { data, response, err in
+            dataTask(with: convertible.request.applying(urlTransform)) { data, response, err in
                 guard let data, let response else {
                     continuation.resume(throwing: err ?? AUError.invalidCallingConvention)
                     return
@@ -23,10 +12,9 @@ extension URLSession {
             }.resume()
         }
     }
-    
-    func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL, proxy: URLRequestProxy? = nil) async throws -> AsyncThrowingStream<DownloadingState, Error> {
-        let request = convertible.request.applyOrOriginal(proxy: proxy)
-        aulog("downloadTask", convertible, request)
+
+    func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL, urlTransform: URLTransform? = nil) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        let request = convertible.request.applying(urlTransform)
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
             Task(priority: .userInitiated) { [weak self] in
@@ -35,10 +23,10 @@ extension URLSession {
                 let task = downloadTask(with: request) { tmp, rso, err in
                     if let error = err {
                         continuation.finish(throwing: error)
-                    } else if let rsp = rso, let tmp = tmp {
+                    } else if rso != nil, let tmp = tmp {
                         do {
                             try FileManager.default.moveItem(at: tmp, to: saveLocation)
-                            continuation.yield(.finished(saveLocation: saveLocation, response: rsp))
+                            continuation.yield(.finished(saveLocation: saveLocation))
                             continuation.finish()
                         } catch {
                             continuation.finish(throwing: error)
@@ -47,7 +35,7 @@ extension URLSession {
                         continuation.finish(throwing: AUError.invalidCallingConvention)
                     }
                 }
-                continuation.yield(.progress(task.progress))
+                continuation.yield(.progress(fractionCompleted: task.progress.fractionCompleted))
                 task.resume()
             }
         }
@@ -62,24 +50,19 @@ public struct URLTaskResult: Sendable {
 public protocol URLRequestConvertible {
     var request: URLRequest { get }
 }
+
 extension URLRequest: URLRequestConvertible {
     public var request: URLRequest { return self }
 }
+
 extension URL: URLRequestConvertible {
     public var request: URLRequest { return URLRequest(url: self) }
-}
-extension String: URLRequestConvertible {
-    public var request: URLRequest {
-        guard let url = URL(string: self) else {
-            fatalError("Invalid URL string: \(self)")
-        }
-        return URLRequest(url: url)
-    }
 }
 
 extension URLTaskResult {
     func validate() throws -> URLTaskResult {
         guard let response = self.response as? HTTPURLResponse else { return self }
+
         switch response.statusCode {
         case 200..<300:
             return self
@@ -93,40 +76,19 @@ public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
     case badStatusCode(Int, Data, HTTPURLResponse)
 
     public var errorDescription: String? {
-        func url(_ rsp: URLResponse) -> String {
-            return rsp.url?.absoluteString ?? "nil"
-        }
         switch self {
         case .badStatusCode(401, _, let response):
-            return "Unauthorized (\(url(response))"
+            return "Unauthorized (\(response.url?.absoluteString ?? "nil"))"
         case .badStatusCode(let code, _, let response):
-            return "Invalid HTTP response (\(code)) for \(url(response))."
-        }
-    }
-
-    public func decodeResponse<T: Decodable>(_ t: T.Type, decoder: JSONDecoder = JSONDecoder()) -> T? {
-        switch self {
-        case .badStatusCode(_, let data, _):
-            return try? decoder.decode(t, from: data)
-        }
-    }
-
-    public var jsonDictionary: Any? {
-        switch self {
-        case .badStatusCode(_, let data, _):
-            return try? JSONSerialization.jsonObject(with: data)
-        }
-    }
-
-    var responseBodyString: String? {
-        switch self {
-        case .badStatusCode(_, let data, _):
-            return String(data: data, encoding: .utf8)
+            return "Invalid HTTP response (\(code)) for \(response.url?.absoluteString ?? "nil")."
         }
     }
 
     public var failureReason: String? {
-        return responseBodyString
+        switch self {
+        case .badStatusCode(_, let data, _):
+            return String(data: data, encoding: .utf8)
+        }
     }
 
     public var description: String {
@@ -143,7 +105,7 @@ public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
     }
 }
 
-public enum DownloadingState: @unchecked Sendable {
-    case progress(Progress)
-    case finished(saveLocation: URL, response: URLResponse)
+public enum DownloadingState: Sendable {
+    case progress(fractionCompleted: Double)
+    case finished(saveLocation: URL)
 }
