@@ -28,6 +28,12 @@ public struct DeferredUpdate: Codable, Sendable {
     public func loadBundle() -> Bundle? {
         Bundle(url: URL(fileURLWithPath: bundlePath))
     }
+
+    /// Returns true if the deferred update bundle still exists at the stored path.
+    /// Use this on app launch to validate that a stored deferred update is still valid.
+    public var isValid: Bool {
+        loadBundle() != nil
+    }
 }
 
 // MARK: - Persistence Helpers

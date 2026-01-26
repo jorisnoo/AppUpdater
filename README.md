@@ -108,6 +108,20 @@ func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.Termin
 
 The app quits normally; the next launch uses the new version.
 
+3. **On app launch**, validate the deferred update still exists (the bundle may have been deleted):
+```swift
+func applicationDidFinishLaunching(_ notification: Notification) {
+    // Validate deferred update bundle still exists
+    if let data = UserDefaults.standard.data(forKey: "deferredUpdate"),
+       let deferred = try? JSONDecoder().decode(DeferredUpdate.self, from: data),
+       !deferred.isValid {
+        // Bundle was deleted, clear the stale preference
+        UserDefaults.standard.removeObject(forKey: "deferredUpdate")
+        DeferredUpdate.cleanup()
+    }
+}
+```
+
 ## Update Flow
 
 AppUpdater uses a state machine to track progress:
