@@ -8,13 +8,12 @@
 import Foundation
 import class AppKit.NSBackgroundActivityScheduler
 import var AppKit.NSApp
-import Foundation
-import Version
+@preconcurrency import Version
 import Path
 
-public class AppUpdater: ObservableObject {
-    public typealias OnSuccess = () -> Void
-    public typealias OnFail = (Swift.Error) -> Void
+public final class AppUpdater: ObservableObject, @unchecked Sendable {
+    public typealias OnSuccess = @Sendable () -> Void
+    public typealias OnFail = @Sendable (Swift.Error) -> Void
 
     let activity: NSBackgroundActivityScheduler
     let owner: String
@@ -24,17 +23,17 @@ public class AppUpdater: ObservableObject {
     var slug: String {
         return "\(owner)/\(repo)"
     }
-    
+
     var proxy: URLRequestProxy?
     public var provider: ReleaseProvider
-    
+
     @available(*, deprecated, message: "This variable is deprecated. Use state instead.")
     @Published public var downloadedAppBundle: Bundle?
-    
+
     /// update state
     @MainActor
     @Published public var state: UpdateState = .none
-    
+
     /// all releases
     @MainActor
     @Published public var releases: [Release] = []
@@ -49,19 +48,25 @@ public class AppUpdater: ObservableObject {
 
     public var onDownloadSuccess: OnSuccess? = nil
     public var onDownloadFail: OnFail? = nil
-    
+
     public var onInstallSuccess: OnSuccess? = nil
     public var onInstallFail: OnFail? = nil
-    
+
     public var allowPrereleases = false
     /// Whether to append debug traces into `debugInfo` for UI
     public var enableDebugInfo = false
     /// Skip code signing validation (useful for mock/testing).
     public var skipCodeSignValidation = false
-    
+
+    private let lock = NSLock()
+    private var _preferredChangelogLanguages: [String] = Locale.preferredLanguages
+
     /// Preferred languages when selecting a localized changelog from a release body.
     /// Default uses system preferred languages.
-    public var preferredChangelogLanguages: [String] = Locale.preferredLanguages
+    public var preferredChangelogLanguages: [String] {
+        get { lock.withLock { _preferredChangelogLanguages } }
+        set { lock.withLock { _preferredChangelogLanguages = newValue } }
+    }
     
     private var progressTimer: Timer? = nil
     
@@ -108,6 +113,9 @@ public class AppUpdater: ObservableObject {
         case noValidUpdate
         case unzipFailed
         case downloadFailed
+        case pathTraversalDetected
+        case extractionTimeout
+        case invalidURL(String)
     }
     
     public func check(success: OnSuccess? = nil, fail: OnFail? = nil) {
@@ -123,6 +131,7 @@ public class AppUpdater: ObservableObject {
         }
     }
     
+    @MainActor
     public func install(success: OnSuccess? = nil, fail: OnFail? = nil) {
         guard let appBundle = downloadedAppBundle else {
             fail?(Error.invalidDownloadedBundle)
@@ -131,6 +140,7 @@ public class AppUpdater: ObservableObject {
         install(appBundle, success: success, fail: fail)
     }
 
+    @MainActor
     public func install(_ appBundle: Bundle, success: OnSuccess? = nil, fail: OnFail? = nil) {
         do {
             try installThrowing(appBundle)
@@ -177,11 +187,12 @@ public class AppUpdater: ObservableObject {
                     trace("downloading", Int(progress.fractionCompleted * 100), "%")
                     DispatchQueue.main.async {
                         self.progressTimer?.invalidate()
-                        self.progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { _ in
-                            self.notifyStateChanged(newState: .downloading(release, asset, fraction: progress.fractionCompleted))
+                        self.progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                            Task { @MainActor in
+                                self?.notifyStateChanged(newState: .downloading(release, asset, fraction: progress.fractionCompleted))
+                            }
                         }
                     }
-
                     break
                 case .finished(let saveLocation, _):
                     trace("download finished at", saveLocation.path)
@@ -205,7 +216,9 @@ public class AppUpdater: ObservableObject {
             
             aulog("notice: AppUpdater unziped", unziped)
             
-            let downloadedAppBundle = Bundle(url: unziped)!
+            guard let downloadedAppBundle = Bundle(url: unziped) else {
+                throw Error.invalidDownloadedBundle
+            }
 
             if try await validate(codeSigning: .main, downloadedAppBundle) {
                 aulog("notice: AppUpdater validated", dst)
@@ -222,15 +235,15 @@ public class AppUpdater: ObservableObject {
         let releases = try await provider.fetchReleases(owner: owner, repo: repo, proxy: proxy)
         trace("fetched releases count:", releases.count)
 
-        notifyReleasesDidChange(releases)
+        await notifyReleasesDidChange(releases)
 
         guard let (release, asset) = try releases.findViableUpdate(appVersion: currentVersion, releasePrefix: self.releasePrefix, prerelease: self.allowPrereleases) else {
             trace("no viable update for", currentVersion.description, "prefix", self.releasePrefix, "prerelease", self.allowPrereleases)
             throw Error.noValidUpdate
         }
-        
+
         trace("viable release:", release.tagName.description, "asset:", asset.name)
-        notifyStateChanged(newState: .newVersionDetected(release, asset))
+        await notifyStateChanged(newState: .newVersionDetected(release, asset))
 
         if let bundle = try await update(with: asset, belongs: release) {
             /// @deprecated
@@ -238,10 +251,11 @@ public class AppUpdater: ObservableObject {
                 self.downloadedAppBundle = bundle
             }
             /// in new version:
-            notifyStateChanged(newState: .downloaded(release, asset, bundle))
+            await notifyStateChanged(newState: .downloaded(release, asset, bundle))
         }
     }
     
+    @MainActor
     public func installThrowing(_ downloadedAppBundle: Bundle) throws {
         trace("install start")
         let installedAppBundle = Bundle.main
@@ -251,8 +265,12 @@ public class AppUpdater: ObservableObject {
         }
         let finalExecutable = installedAppBundle.path/exe.relative(to: downloadedAppBundle.path)
 
-        try installedAppBundle.path.delete()
-        try downloadedAppBundle.path.move(to: installedAppBundle.path)
+        _ = try FileManager.default.replaceItemAt(
+            installedAppBundle.bundleURL,
+            withItemAt: downloadedAppBundle.bundleURL,
+            backupItemName: "backup.app",
+            options: .usingNewMetadataOnly
+        )
         trace("bundle replaced")
 
         let proc = Process()
@@ -269,16 +287,14 @@ public class AppUpdater: ObservableObject {
         NSApp.terminate(self)
     }
     
+    @MainActor
     private func notifyStateChanged(newState: UpdateState) {
-        Task { @MainActor in
-            state = newState
-        }
+        state = newState
     }
-    
+
+    @MainActor
     private func notifyReleasesDidChange(_ releases: [Release]) {
-        Task { @MainActor in
-            self.releases = releases
-        }
+        self.releases = releases
     }
 
     // MARK: - Localized Changelog via attachments or body
@@ -384,12 +400,12 @@ public class AppUpdater: ObservableObject {
     }
 }
 
-public struct Release: Decodable {
+public struct Release: Decodable, Sendable {
     let tag_name: Version
     public var tagName: Version { tag_name }
     
     public let prerelease: Bool
-    public struct Asset: Decodable {
+    public struct Asset: Decodable, Sendable {
         public let name: String
         let browser_download_url: URL
         public var downloadUrl: URL { browser_download_url }
@@ -443,7 +459,7 @@ public struct Release: Decodable {
     }
 }
 
-public enum ContentType: Decodable {
+public enum ContentType: Decodable, Sendable {
     public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
         case "application/x-bzip2", "application/x-xz", "application/x-gzip":
@@ -510,17 +526,41 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
         throw AUError.badInput
     }
 
+    func validateExtractedContents(in directory: URL) throws {
+        let basePath = directory.standardizedFileURL.path
+        guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) else {
+            return
+        }
+
+        while let url = enumerator.nextObject() as? URL {
+            let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
+            guard resolved.hasPrefix(basePath) else {
+                throw AppUpdater.Error.pathTraversalDetected
+            }
+        }
+    }
+
     func findApp() async throws -> URL? {
-        let cnts = try FileManager.default.contentsOfDirectory(at: url.deletingLastPathComponent(), includingPropertiesForKeys: [.isDirectoryKey], options: .skipsSubdirectoryDescendants)
+        let cnts = try FileManager.default.contentsOfDirectory(at: url.deletingLastPathComponent(), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: .skipsSubdirectoryDescendants)
         for url in cnts {
             guard url.pathExtension == "app" else { continue }
-            guard let foo = try url.resourceValues(forKeys: [.isDirectoryKey]).isDirectory, foo else { continue }
+            let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            guard resourceValues.isDirectory == true, resourceValues.isSymbolicLink != true else { continue }
             return url
         }
         return nil
     }
 
+    let timeoutTask = Task {
+        try await Task.sleep(nanoseconds: 30_000_000_000)
+        proc.terminate()
+    }
     let _ = try await proc.launching()
+    timeoutTask.cancel()
+
+    let extractionDir = url.deletingLastPathComponent()
+    try validateExtractedContents(in: extractionDir)
+
     return try await findApp()
 }
 

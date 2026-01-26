@@ -1,7 +1,7 @@
 import Foundation
 
-public final class MockReleaseProvider: ReleaseProvider {
-    public enum Source {
+public final class MockReleaseProvider: ReleaseProvider, Sendable {
+    public enum Source: Sendable {
         case bundled // use `Bundle.module` resources
         case fileURL(URL) // load JSON from a local file URL
     }
@@ -37,19 +37,23 @@ public final class MockReleaseProvider: ReleaseProvider {
     }
 
     public func download(asset: Release.Asset, to saveLocation: URL, proxy: URLRequestProxy?) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        let steps = simulatedSteps
+        let delay = simulatedDelay
+        let assetName = asset.name
+
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
             Task {
                 // Simulate progress
-                for i in 1...simulatedSteps {
-                    try await Task.sleep(nanoseconds: simulatedDelay)
-                    let p = Progress(totalUnitCount: Int64(simulatedSteps))
+                for i in 1...steps {
+                    try await Task.sleep(nanoseconds: delay)
+                    let p = Progress(totalUnitCount: Int64(steps))
                     p.completedUnitCount = Int64(i)
                     continuation.yield(.progress(p))
                 }
 
                 // Materialize a mock zip at saveLocation if requested type is zip, otherwise tar
                 do {
-                    try await createMockArchive(at: saveLocation, assetName: asset.name)
+                    try await MockReleaseProvider.createMockArchive(at: saveLocation, assetName: assetName)
                     let rsp = URLResponse(url: saveLocation, mimeType: nil, expectedContentLength: -1, textEncodingName: nil)
                     continuation.yield(.finished(saveLocation: saveLocation, response: rsp))
                     continuation.finish()
@@ -74,8 +78,8 @@ public final class MockReleaseProvider: ReleaseProvider {
         }
         // Try case-insensitive search by listing contents of Mocks
         if let mocksURL = Bundle.module.resourceURL?.appendingPathComponent("Mocks") {
-            if let enumerator = FileManager.default.enumerator(at: mocksURL, includingPropertiesForKeys: nil) {
-                for case let fileURL as URL in enumerator {
+            if let contents = try? FileManager.default.contentsOfDirectory(at: mocksURL, includingPropertiesForKeys: nil) {
+                for fileURL in contents {
                     if fileURL.lastPathComponent.lowercased() == asset.name.lowercased() {
                         return try Data(contentsOf: fileURL)
                     }
@@ -85,7 +89,7 @@ public final class MockReleaseProvider: ReleaseProvider {
         throw AUError.badInput
     }
 
-    private func createMockArchive(at url: URL, assetName: String) async throws {
+    private static func createMockArchive(at url: URL, assetName: String) async throws {
         // Decide archive type by extension
         let ext = (assetName as NSString).pathExtension.lowercased()
         let tempDir = url.deletingLastPathComponent().appendingPathComponent(UUID().uuidString)
@@ -135,7 +139,7 @@ public final class MockReleaseProvider: ReleaseProvider {
         try? FileManager.default.removeItem(at: tempDir)
     }
 
-    private func shellZip(contentsOf dir: URL, into dst: URL) async throws {
+    private static func shellZip(contentsOf dir: URL, into dst: URL) async throws {
         let proc = Process()
         proc.launchPath = "/usr/bin/zip"
         proc.currentDirectoryPath = dir.path
@@ -143,7 +147,7 @@ public final class MockReleaseProvider: ReleaseProvider {
         let _ = try await proc.launching()
     }
 
-    private func shellTar(contentsOf dir: URL, into dst: URL) async throws {
+    private static func shellTar(contentsOf dir: URL, into dst: URL) async throws {
         let proc = Process()
         proc.launchPath = "/usr/bin/tar"
         proc.currentDirectoryPath = dir.path

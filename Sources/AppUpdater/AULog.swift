@@ -12,9 +12,9 @@ public class AULog {
     static let logger = Logger(subsystem: "com.gokoding.appupdater", category: "main")
     
     #if DEBUG
-    public static var printLog = true
+    public nonisolated(unsafe) static var printLog = true
     #else
-    public static var printLog = false
+    public nonisolated(unsafe) static var printLog = false
     #endif
     
     @inline(__always)

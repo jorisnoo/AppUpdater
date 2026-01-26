@@ -14,11 +14,15 @@ open class URLRequestProxy: NSObject {
         guard let url = request.url else {
             throw AUProxyError.invalidURL
         }
-        return apply(to: url).request
+        return try apply(to: url).request
     }
     
-    open func apply(to url: URL) -> URL {
-        URL(string: apply(to: url.absoluteString))!
+    open func apply(to url: URL) throws -> URL {
+        let urlString = apply(to: url.absoluteString)
+        guard let result = URL(string: urlString) else {
+            throw AUProxyError.invalidURL
+        }
+        return result
     }
     
     open func apply(to urlString: String) -> String {
@@ -35,8 +39,8 @@ extension URLRequest {
         try proxy.apply(to: self)
     }
     
-    public func apply(proxy: URLRequestProxy) -> URLRequest {
-        try! proxy.apply(to: self)
+    public func apply(proxy: URLRequestProxy) throws -> URLRequest {
+        try proxy.apply(to: self)
     }
     
     public func apply(proxy: URLRequestProxy?) -> URLRequest? {

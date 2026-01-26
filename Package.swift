@@ -1,4 +1,4 @@
-// swift-tools-version: 5.9
+// swift-tools-version: 6.0
 // The swift-tools-version declares the minimum version of Swift required to build this package.
 
 import PackageDescription
@@ -12,7 +12,7 @@ let package = Package(
         .library(
             name: "AppUpdater",
             targets: ["AppUpdater"]),
-        .executable(name: "AppUpdaterMockRunner", targets: ["AppUpdaterMockRunner"]) 
+        .executable(name: "AppUpdaterMockRunner", targets: ["AppUpdaterMockRunner"])
     ],
     dependencies: [
         .package(url: "https://github.com/mxcl/Version.git", .upToNextMajor(from: "2.0.1")),
@@ -31,6 +31,9 @@ let package = Package(
             ],
             resources: [
                 .process("Resources")
+            ],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency")
             ]
         ),
         .executableTarget(

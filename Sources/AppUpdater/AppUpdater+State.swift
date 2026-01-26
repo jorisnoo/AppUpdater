@@ -9,16 +9,16 @@ import Foundation
 
 public extension AppUpdater {
 
-    enum UpdateState {
+    enum UpdateState: @unchecked Sendable {
         /// no updates
         case none
-        
+
         /// new version
         case newVersionDetected(Release, Release.Asset)
-        
+
         /// the new version was downloading
         case downloading(Release, Release.Asset, fraction: Double)
-        
+
         /// the bundle is ready
         case downloaded(Release, Release.Asset, Bundle)
         

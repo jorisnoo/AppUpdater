@@ -6,12 +6,15 @@ public protocol ReleaseProvider {
     func fetchAssetData(asset: Release.Asset, proxy: URLRequestProxy?) async throws -> Data
 }
 
-public struct GithubReleaseProvider: ReleaseProvider {
+public struct GithubReleaseProvider: ReleaseProvider, Sendable {
     public init() {}
 
     public func fetchReleases(owner: String, repo: String, proxy: URLRequestProxy?) async throws -> [Release] {
         let slug = "\(owner)/\(repo)"
-        let url = URL(string: "https://api.github.com/repos/\(slug)/releases")!
+        let urlString = "https://api.github.com/repos/\(slug)/releases"
+        guard let url = URL(string: urlString) else {
+            throw AppUpdater.Error.invalidURL(urlString)
+        }
         guard let task = try await URLSession.shared.dataTask(with: url, proxy: proxy)?.validate() else {
             throw AUError.invalidCallingConvention
         }

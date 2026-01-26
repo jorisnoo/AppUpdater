@@ -25,13 +25,14 @@ extension URLSession {
     }
     
     func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL, proxy: URLRequestProxy? = nil) async throws -> AsyncThrowingStream<DownloadingState, Error> {
-        aulog("downloadTask", convertible, convertible.request.applyOrOriginal(proxy: proxy))
+        let request = convertible.request.applyOrOriginal(proxy: proxy)
+        aulog("downloadTask", convertible, request)
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
             Task(priority: .userInitiated) { [weak self] in
                 guard let self else { return }
-                
-                let task = downloadTask(with: convertible.request.applyOrOriginal(proxy: proxy)) { tmp, rso, err in
+
+                let task = downloadTask(with: request) { tmp, rso, err in
                     if let error = err {
                         continuation.finish(throwing: error)
                     } else if let rsp = rso, let tmp = tmp {
@@ -50,10 +51,10 @@ extension URLSession {
                 task.resume()
             }
         }
-   }
+    }
 }
 
-public struct URLTaskResult {
+public struct URLTaskResult: Sendable {
     let data: Data
     let response: URLResponse
 }
@@ -68,7 +69,12 @@ extension URL: URLRequestConvertible {
     public var request: URLRequest { return URLRequest(url: self) }
 }
 extension String: URLRequestConvertible {
-    public var request: URLRequest { return URLRequest(url: URL(string: self)!) }
+    public var request: URLRequest {
+        guard let url = URL(string: self) else {
+            fatalError("Invalid URL string: \(self)")
+        }
+        return URLRequest(url: url)
+    }
 }
 
 extension URLTaskResult {
@@ -142,7 +148,7 @@ public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
 }
 #endif
 
-public enum DownloadingState {
+public enum DownloadingState: @unchecked Sendable {
     case progress(Progress)
     case finished(saveLocation: URL, response: URLResponse)
 }
