@@ -16,8 +16,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/mxcl/Version.git", .upToNextMajor(from: "2.0.1")),
-        .package(url: "https://github.com/mxcl/Path.swift.git", from: "1.0.0"),
-        .package(url: "https://github.com/gonzalezreal/swift-markdown-ui.git", .upToNextMajor(from: "2.3.1"))
+        .package(url: "https://github.com/mxcl/Path.swift.git", from: "1.0.0")
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -26,8 +25,7 @@ let package = Package(
             name: "AppUpdater",
             dependencies: [
                 "Version",
-                .product(name: "Path", package: "Path.swift"),
-                .product(name: "MarkdownUI", package: "swift-markdown-ui"),
+                .product(name: "Path", package: "Path.swift")
             ],
             resources: [
                 .process("Resources")
@@ -38,6 +36,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "AppUpdaterMockRunner",
+            dependencies: ["AppUpdater"]
+        ),
+        .testTarget(
+            name: "AppUpdaterTests",
             dependencies: ["AppUpdater"]
         )
     ]

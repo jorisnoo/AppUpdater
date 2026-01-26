@@ -64,31 +64,6 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         }
     }
 
-    public func fetchAssetData(asset: Release.Asset, proxy: URLRequestProxy?) async throws -> Data {
-        // Attempt to load a file from bundled Mocks matching the asset name
-        let basename = (asset.name as NSString).deletingPathExtension
-        let ext = (asset.name as NSString).pathExtension
-        // Try at bundle root first
-        if let url = Bundle.module.url(forResource: basename, withExtension: ext.isEmpty ? nil : ext) {
-            return try Data(contentsOf: url)
-        }
-        // Try under Mocks subdirectory
-        if let url = Bundle.module.url(forResource: basename, withExtension: ext.isEmpty ? nil : ext, subdirectory: "Mocks") {
-            return try Data(contentsOf: url)
-        }
-        // Try case-insensitive search by listing contents of Mocks
-        if let mocksURL = Bundle.module.resourceURL?.appendingPathComponent("Mocks") {
-            if let contents = try? FileManager.default.contentsOfDirectory(at: mocksURL, includingPropertiesForKeys: nil) {
-                for fileURL in contents {
-                    if fileURL.lastPathComponent.lowercased() == asset.name.lowercased() {
-                        return try Data(contentsOf: fileURL)
-                    }
-                }
-            }
-        }
-        throw AUError.badInput
-    }
-
     private static func createMockArchive(at url: URL, assetName: String) async throws {
         // Decide archive type by extension
         let ext = (assetName as NSString).pathExtension.lowercased()

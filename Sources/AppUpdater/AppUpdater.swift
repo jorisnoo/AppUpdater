@@ -10,6 +10,7 @@ import class AppKit.NSBackgroundActivityScheduler
 import var AppKit.NSApp
 @preconcurrency import Version
 import Path
+import OSLog
 
 public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public typealias OnSuccess = @Sendable () -> Void
@@ -27,9 +28,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     var proxy: URLRequestProxy?
     public var provider: ReleaseProvider
 
-    @available(*, deprecated, message: "This variable is deprecated. Use state instead.")
-    @Published public var downloadedAppBundle: Bundle?
-
     /// update state
     @MainActor
     @Published public var state: UpdateState = .none
@@ -42,10 +40,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     @MainActor
     @Published public var lastError: Swift.Error?
 
-    /// in-app debug traces for UI diagnostics
-    @MainActor
-    @Published public var debugInfo: [String] = []
-
     public var onDownloadSuccess: OnSuccess? = nil
     public var onDownloadFail: OnFail? = nil
 
@@ -53,21 +47,9 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public var onInstallFail: OnFail? = nil
 
     public var allowPrereleases = false
-    /// Whether to append debug traces into `debugInfo` for UI
-    public var enableDebugInfo = false
     /// Skip code signing validation (useful for mock/testing).
     public var skipCodeSignValidation = false
 
-    private let lock = NSLock()
-    private var _preferredChangelogLanguages: [String] = Locale.preferredLanguages
-
-    /// Preferred languages when selecting a localized changelog from a release body.
-    /// Default uses system preferred languages.
-    public var preferredChangelogLanguages: [String] {
-        get { lock.withLock { _preferredChangelogLanguages } }
-        set { lock.withLock { _preferredChangelogLanguages = newValue } }
-    }
-    
     private var progressTimer: Timer? = nil
     
     private lazy var session: URLSession = {
@@ -132,15 +114,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     }
     
     @MainActor
-    public func install(success: OnSuccess? = nil, fail: OnFail? = nil) {
-        guard let appBundle = downloadedAppBundle else {
-            fail?(Error.invalidDownloadedBundle)
-            return
-        }
-        install(appBundle, success: success, fail: fail)
-    }
-
-    @MainActor
     public func install(_ appBundle: Bundle, success: OnSuccess? = nil, fail: OnFail? = nil) {
         do {
             try installThrowing(appBundle)
@@ -174,11 +147,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         await notifyStateChanged(newState: .newVersionDetected(release, asset))
 
         if let bundle = try await downloadAndExtract(asset: asset, release: release) {
-            /// @deprecated
-            Task { @MainActor in
-                self.downloadedAppBundle = bundle
-            }
-            /// in new version:
             await notifyStateChanged(newState: .downloaded(release, asset, bundle))
         }
     }
@@ -292,82 +260,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     @MainActor
     private func notifyReleasesDidChange(_ releases: [Release]) {
         self.releases = releases
-    }
-
-    // MARK: - Localized Changelog via attachments or body
-
-    /// Try to load a localized changelog from release assets with naming like
-    /// `CHANGELOG.<lang>.md|txt` (case-insensitive). Falls back to parsing the
-    /// release body for embedded language blocks, then to original body.
-    ///
-    /// **Logic:**
-    /// For each preferred language (in order):
-    ///   1. Check if there's a matching asset file (e.g., CHANGELOG.zh.md)
-    ///   2. Check if there's a matching language block in body (<!-- au:lang=xx -->)
-    ///   3. If body has NO language blocks at all, treat entire body as that language's content
-    /// If no match found for any preferred language:
-    ///   - Fallback logic: default block > en block > first available > original body
-    public func localizedChangelog(for release: Release) async -> String? {
-        // Parse body sections once
-        let sections = Release.parseLanguageSections(from: release.body)
-        let hasLanguageBlocks = !sections.isEmpty
-
-        // Try each preferred language in order
-        for lang in preferredChangelogLanguages {
-            let candidates = Release.languageCandidates(for: lang)
-
-            // 1) Try asset file for this language
-            if let asset = findChangelogAsset(in: release.assets, candidates: candidates) {
-                if let data = try? await provider.fetchAssetData(asset: asset, proxy: proxy),
-                   let text = String(data: data, encoding: .utf8) {
-                    return text.trimmingCharacters(in: .whitespacesAndNewlines)
-                }
-            }
-
-            // 2) Try body section for this language (if language blocks exist)
-            if hasLanguageBlocks {
-                for candidate in candidates {
-                    if let matched = sections[candidate] {
-                        return matched
-                    }
-                }
-            } else {
-                // 3) No language blocks - treat entire body as base language
-                // Return body for the first preferred language (typically the base language)
-                return release.body.trimmingCharacters(in: .whitespacesAndNewlines)
-            }
-        }
-
-        // No match for any preferred language
-        if hasLanguageBlocks {
-            // Fallback: default block > en block > first available
-            if let def = sections["default"] { return def }
-            if let en = sections["en"] { return en }
-            return sections.values.first ?? release.body
-        } else {
-            // No language blocks - return original body
-            return release.body.trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-    }
-
-    private func findChangelogAsset(in assets: [Release.Asset], candidates: [String]) -> Release.Asset? {
-        let names = assets.map { $0.name }
-        // Try patterns like CHANGELOG.<lang>.md/.txt (case-insensitive)
-        for lang in candidates {
-            let patterns = [
-                "CHANGELOG.\(lang).md",
-                "CHANGELOG.\(lang).markdown",
-                "CHANGELOG.\(lang).txt",
-                "Changelog.\(lang).md",
-                "Changelog.\(lang).txt"
-            ]
-            for p in patterns {
-                if let idx = names.firstIndex(where: { $0.lowercased() == p.lowercased() }) {
-                    return assets[idx]
-                }
-            }
-        }
-        return nil
     }
 }
 
@@ -563,13 +455,11 @@ public extension Bundle {
 
 // MARK: - Debug Trace helper
 extension AppUpdater {
+    private static let logger = Logger(subsystem: "AppUpdater", category: "update")
+
     @inline(__always)
     func trace(_ items: Any...) {
-        aulog(items)
-        guard enableDebugInfo else { return }
         let msg = items.map { String(describing: $0) }.joined(separator: " ")
-        Task { @MainActor in
-            self.debugInfo.append(msg)
-        }
+        Self.logger.debug("\(msg, privacy: .public)")
     }
 }
