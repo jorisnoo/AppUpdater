@@ -195,22 +195,35 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         }
     }
     
+    /// Replaces the running app bundle with the downloaded bundle.
+    /// Does NOT relaunch the app - use this for "install on quit" scenarios.
+    /// - Parameter downloadedAppBundle: The validated bundle to install
+    /// - Returns: URL of the backup bundle (or nil if no backup was kept)
     @MainActor
-    public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
-        trace("install start")
+    public func replaceBundle(_ downloadedAppBundle: Bundle) throws -> URL? {
+        trace("replaceBundle start")
         let installedAppBundle = Bundle.main
-        guard let exe = downloadedAppBundle.executableURL, FileManager.default.fileExists(atPath: exe.path) else {
+        guard let exe = downloadedAppBundle.executableURL,
+              FileManager.default.fileExists(atPath: exe.path) else {
             trace("invalid downloaded bundle")
             throw Error.invalidDownloadedBundle
         }
 
-        _ = try FileManager.default.replaceItemAt(
+        let result = try FileManager.default.replaceItemAt(
             installedAppBundle.bundleURL,
             withItemAt: downloadedAppBundle.bundleURL,
             backupItemName: "backup.app",
             options: .usingNewMetadataOnly
         )
-        trace("bundle replaced")
+        trace("bundle replaced without relaunch")
+        return result
+    }
+
+    @MainActor
+    public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
+        trace("install start")
+        let installedAppBundle = Bundle.main
+        _ = try replaceBundle(downloadedAppBundle)
 
         let newAppURL = installedAppBundle.bundleURL
         let launched = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Swift.Error>) in

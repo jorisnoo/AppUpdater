@@ -59,6 +59,55 @@ if case .downloaded(_, _, let bundle) = updater.state {
 
 The `install(_:)` method replaces the running app with the downloaded bundle and relaunches.
 
+### Deferred Updates (Install on Quit)
+
+For a better user experience, you can defer updates and install them when the user quits:
+
+1. **On download completion**, store the update for later:
+```swift
+if case .downloaded(let release, let asset, let bundle) = updater.state {
+    // Persist bundle to stable location (temp directory may be cleaned)
+    let persistedURL = try DeferredUpdate.persistBundle(bundle)
+
+    // Create and store the deferred update info
+    let deferred = DeferredUpdate(
+        bundlePath: persistedURL.path,
+        releaseVersion: release.tagName.description,
+        releaseName: release.name,
+        assetName: asset.name
+    )
+
+    // Store in UserDefaults (or your preferred storage)
+    UserDefaults.standard.set(try? JSONEncoder().encode(deferred), forKey: "deferredUpdate")
+}
+```
+
+2. **In `applicationShouldTerminate`**, install without relaunch:
+```swift
+func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard let data = UserDefaults.standard.data(forKey: "deferredUpdate"),
+          let deferred = try? JSONDecoder().decode(DeferredUpdate.self, from: data),
+          let bundle = deferred.loadBundle() else {
+        return .terminateNow
+    }
+
+    Task { @MainActor in
+        do {
+            try updater.replaceBundle(bundle)
+            DeferredUpdate.cleanup()
+            UserDefaults.standard.removeObject(forKey: "deferredUpdate")
+        } catch {
+            // Log error but still quit
+        }
+        sender.reply(toApplicationShouldTerminate: true)
+    }
+
+    return .terminateLater
+}
+```
+
+The app quits normally; the next launch uses the new version.
+
 ## Update Flow
 
 AppUpdater uses a state machine to track progress:
