@@ -83,7 +83,7 @@ public extension Release {
         raw.replacingOccurrences(of: "_", with: "-").lowercased()
     }
 
-    private static func languageCandidates(for raw: String) -> [String] {
+    internal static func languageCandidates(for raw: String) -> [String] {
         let normalized = normalizeLanguageKey(raw)
         // Split into components and produce progressively shorter candidates
         var parts = normalized.split(separator: "-").map(String.init)

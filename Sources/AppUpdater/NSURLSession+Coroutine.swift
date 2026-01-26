@@ -89,7 +89,6 @@ extension URLTaskResult {
     }
 }
 
-#if swift(>=3.1)
 public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
     case badStatusCode(Int, Data, HTTPURLResponse)
 
@@ -105,16 +104,13 @@ public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
         }
     }
 
-#if swift(>=4.0)
     public func decodeResponse<T: Decodable>(_ t: T.Type, decoder: JSONDecoder = JSONDecoder()) -> T? {
         switch self {
         case .badStatusCode(_, let data, _):
             return try? decoder.decode(t, from: data)
         }
     }
-#endif
 
-    //TODO rename responseJSON
     public var jsonDictionary: Any? {
         switch self {
         case .badStatusCode(_, let data, _):
@@ -142,11 +138,10 @@ public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
             ]
             dict["URL"] = response.url
             dict["Headers"] = response.allHeaderFields
-            return "<NSHTTPResponse> \(NSDictionary(dictionary: dict))" // as NSDictionary makes the output look like NSHTTPURLResponse looks
+            return "<NSHTTPResponse> \(NSDictionary(dictionary: dict))"
         }
     }
 }
-#endif
 
 public enum DownloadingState: @unchecked Sendable {
     case progress(Progress)

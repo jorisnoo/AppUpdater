@@ -159,78 +159,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         }
         let currentVersion = Bundle.main.version
 
-        func validate(codeSigning b1: Bundle, _ b2: Bundle) async throws -> Bool {
-            do {
-                let csi1 = try? await b1.codeSigningIdentity()
-                let csi2 = try? await b2.codeSigningIdentity()
-
-                if csi1 == nil || csi2 == nil {
-                    return skipCodeSignValidation
-                }
-                trace("compairing current: \(csi1) downloaded: \(csi2) equals? \(csi1 == csi2)")
-                return skipCodeSignValidation || (csi1 == csi2)
-            }
-        }
-
-        func update(with asset: Release.Asset, belongs release: Release) async throws -> Bundle? {
-            aulog("notice: AppUpdater dry-run:", asset)
-            trace("update start:", release.tagName.description, asset.name)
-
-            let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
-
-            let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"), proxy: proxy)
-            
-            var dst: URL? = nil
-            for try await state in downloadState {
-                switch state {
-                case .progress(let progress):
-                    trace("downloading", Int(progress.fractionCompleted * 100), "%")
-                    DispatchQueue.main.async {
-                        self.progressTimer?.invalidate()
-                        self.progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                            Task { @MainActor in
-                                self?.notifyStateChanged(newState: .downloading(release, asset, fraction: progress.fractionCompleted))
-                            }
-                        }
-                    }
-                    break
-                case .finished(let saveLocation, _):
-                    trace("download finished at", saveLocation.path)
-                    dst = saveLocation
-                    progressTimer?.invalidate()
-                    progressTimer = nil
-                }
-            }
-            
-            guard let dst = dst else {
-                trace("download failed: destination missing")
-                throw Error.downloadFailed
-            }
-            
-            aulog("notice: AppUpdater downloaded:", dst)
-
-            guard let unziped = try await unzip(dst, contentType: asset.content_type) else {
-                trace("unzip failed")
-                throw Error.unzipFailed
-            }
-            
-            aulog("notice: AppUpdater unziped", unziped)
-            
-            guard let downloadedAppBundle = Bundle(url: unziped) else {
-                throw Error.invalidDownloadedBundle
-            }
-
-            if try await validate(codeSigning: .main, downloadedAppBundle) {
-                aulog("notice: AppUpdater validated", dst)
-                trace("codesign validated ok")
-
-                return downloadedAppBundle
-            } else {
-                trace("codesign mismatch")
-                throw Error.codeSigningIdentity
-            }
-        }
-
         trace("fetch releases")
         let releases = try await provider.fetchReleases(owner: owner, repo: repo, proxy: proxy)
         trace("fetched releases count:", releases.count)
@@ -245,13 +173,82 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         trace("viable release:", release.tagName.description, "asset:", asset.name)
         await notifyStateChanged(newState: .newVersionDetected(release, asset))
 
-        if let bundle = try await update(with: asset, belongs: release) {
+        if let bundle = try await downloadAndExtract(asset: asset, release: release) {
             /// @deprecated
             Task { @MainActor in
                 self.downloadedAppBundle = bundle
             }
             /// in new version:
             await notifyStateChanged(newState: .downloaded(release, asset, bundle))
+        }
+    }
+
+    private func validateCodeSigning(_ b1: Bundle, _ b2: Bundle) async throws -> Bool {
+        let csi1 = try? await b1.codeSigningIdentity()
+        let csi2 = try? await b2.codeSigningIdentity()
+
+        if csi1 == nil || csi2 == nil {
+            return skipCodeSignValidation
+        }
+
+        trace("comparing current: \(csi1) downloaded: \(csi2) equals? \(csi1 == csi2)")
+        return skipCodeSignValidation || (csi1 == csi2)
+    }
+
+    private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle? {
+        aulog("notice: AppUpdater dry-run:", asset)
+        trace("update start:", release.tagName.description, asset.name)
+
+        let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
+
+        let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"), proxy: proxy)
+
+        var dst: URL? = nil
+        for try await state in downloadState {
+            switch state {
+            case .progress(let progress):
+                trace("downloading", Int(progress.fractionCompleted * 100), "%")
+                DispatchQueue.main.async {
+                    self.progressTimer?.invalidate()
+                    self.progressTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+                        Task { @MainActor in
+                            self?.notifyStateChanged(newState: .downloading(release, asset, fraction: progress.fractionCompleted))
+                        }
+                    }
+                }
+            case .finished(let saveLocation, _):
+                trace("download finished at", saveLocation.path)
+                dst = saveLocation
+                progressTimer?.invalidate()
+                progressTimer = nil
+            }
+        }
+
+        guard let dst = dst else {
+            trace("download failed: destination missing")
+            throw Error.downloadFailed
+        }
+
+        aulog("notice: AppUpdater downloaded:", dst)
+
+        guard let unziped = try await unzip(dst, contentType: asset.content_type) else {
+            trace("unzip failed")
+            throw Error.unzipFailed
+        }
+
+        aulog("notice: AppUpdater unziped", unziped)
+
+        guard let downloadedAppBundle = Bundle(url: unziped) else {
+            throw Error.invalidDownloadedBundle
+        }
+
+        if try await validateCodeSigning(.main, downloadedAppBundle) {
+            aulog("notice: AppUpdater validated", dst)
+            trace("codesign validated ok")
+            return downloadedAppBundle
+        } else {
+            trace("codesign mismatch")
+            throw Error.codeSigningIdentity
         }
     }
     
@@ -317,7 +314,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
 
         // Try each preferred language in order
         for lang in preferredChangelogLanguages {
-            let candidates = languageCandidates(for: lang)
+            let candidates = Release.languageCandidates(for: lang)
 
             // 1) Try asset file for this language
             if let asset = findChangelogAsset(in: release.assets, candidates: candidates) {
@@ -353,32 +350,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         }
     }
 
-    private func languageCandidates(for raw: String) -> [String] {
-        func normalize(_ raw: String) -> String {
-            raw.replacingOccurrences(of: "_", with: "-").lowercased()
-        }
-
-        var parts = normalize(raw).split(separator: "-").map(String.init)
-        if parts.first == "zh" {
-            if parts.contains("cn") || parts.contains("hans") { parts = ["zh", "hans"] }
-            if parts.contains("tw") || parts.contains("hk") || parts.contains("hant") { parts = ["zh", "hant"] }
-        }
-        var c: [String] = []
-        for i in stride(from: parts.count, through: 1, by: -1) {
-            c.append(parts[0..<i].joined(separator: "-"))
-        }
-        if let base = parts.first, !c.contains(base) { c.append(base) }
-        return c
-    }
-
-    private func languageCandidatesList(_ langs: [String]) -> [String] {
-        var list: [String] = []
-        for raw in langs { list.append(contentsOf: languageCandidates(for: raw)) }
-        // Ensure uniqueness preserving order
-        var seen = Set<String>()
-        return list.filter { seen.insert($0).inserted }
-    }
-
     private func findChangelogAsset(in assets: [Release.Asset], candidates: [String]) -> Release.Asset? {
         let names = assets.map { $0.name }
         // Try patterns like CHANGELOG.<lang>.md/.txt (case-insensitive)
@@ -411,7 +382,7 @@ public struct Release: Decodable, Sendable {
         public var downloadUrl: URL { browser_download_url }
         
         let content_type: ContentType
-        public var contentTyle: ContentType { content_type }
+        public var contentType: ContentType { content_type }
     }
     public let assets: [Asset]
     public let body: String

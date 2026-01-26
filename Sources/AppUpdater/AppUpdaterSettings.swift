@@ -81,20 +81,7 @@ public struct AppUpdateSettings: View {
                     }
                 }
                 ForEach(updater.releases.filter({ $0 != updater.state.release }), id: \.tagName) { release in
-                    /// changelog
                     ReleaseRow(release: release)
-//                        .background {
-//                            GeometryReader {
-//                                let frame = $0.frame(in: .global)
-//                                Color.clear.onChange(of: frame.size) { newValue in
-//                                    DispatchQueue.main.async {
-//                                        withAnimation {
-//                                            reader.scrollTo(0, anchor: .init(x: 0, y: -(frame.minY + newValue.height) ))
-//                                        }
-//                                    }
-//                                }
-//                            }
-//                        }
                 }
             }
             .formStyle(.grouped)
@@ -108,9 +95,9 @@ public struct AppUpdateSettings: View {
     }
     
     func openURL(url: String) {
-        let url = URL(string: url)!
+        guard let parsedURL = URL(string: url) else { return }
 
-        if NSWorkspace.shared.open(url) {
+        if NSWorkspace.shared.open(parsedURL) {
             print("success")
         } else {
             print("failed")
@@ -187,53 +174,6 @@ struct FloatingDiagnostics: View {
             .padding(.trailing, 6)
         }
         .padding(12)
-    }
-}
-
-struct DiagnosticsView: View {
-    @EnvironmentObject var updater: AppUpdater
-    @State private var expanded: Bool = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Text("Diagnostics")
-                    .font(.headline)
-                Spacer()
-                Toggle("Enable Logs", isOn: Binding(get: {
-                    updater.enableDebugInfo
-                }, set: { updater.enableDebugInfo = $0 }))
-                .toggleStyle(.switch)
-                .labelsHidden()
-            }
-
-            if let err = updater.lastError {
-                Text("Last Error: \(String(describing: err))")
-                    .font(.callout)
-                    .foregroundStyle(.red)
-            }
-
-            if updater.debugInfo.isEmpty {
-                Text("No logs yet")
-                    .foregroundStyle(.secondary)
-            } else {
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(Array(updater.debugInfo.enumerated()), id: \.offset) { _, line in
-                            Text(line).font(.system(.caption, design: .monospaced))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                    }
-                }
-                .frame(minHeight: 120, maxHeight: 200)
-            }
-
-            HStack {
-                Button("Clear Logs") { updater.debugInfo.removeAll() }
-                Spacer()
-                Button("Check Now") { updater.check() }
-            }
-        }
     }
 }
 

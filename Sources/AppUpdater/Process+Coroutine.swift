@@ -14,23 +14,12 @@ extension Process {
         standardOutput = stdout
         standardError = stderr
 
-        do {
-            #if swift(>=4.0)
-            if #available(OSX 10.13, *) {
-                try run()
-            } else if let path = launchPath, FileManager.default.isExecutableFile(atPath: path) {
-                launch()
-            } else {
-                throw ProcessError.notExecutable(launchPath)
-            }
-            #else
-            guard let path = launchPath, FileManager.default.isExecutableFile(atPath: path) else {
-                throw ProcessError.notExecutable(launchPath)
-            }
+        if #available(OSX 10.13, *) {
+            try run()
+        } else if let path = launchPath, FileManager.default.isExecutableFile(atPath: path) {
             launch()
-            #endif
-        } catch {
-            throw error
+        } else {
+            throw ProcessError.notExecutable(launchPath)
         }
 
         stdout.fileHandleForReading.readDataToEndOfFile()
@@ -103,13 +92,7 @@ extension Process {
         var args = [launchPath]
         arguments.flatMap{ args += $0 }
         return args.map { arg in
-            let contains: Bool
-            #if swift(>=3.2)
-            contains = arg.contains(" ")
-            #else
-            contains = arg.characters.contains(" ")
-            #endif
-            if contains {
+            if arg.contains(" ") {
                 return "\"\(arg)\""
             } else if arg == "" {
                 return "\"\""

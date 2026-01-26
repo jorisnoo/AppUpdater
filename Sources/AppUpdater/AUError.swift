@@ -84,27 +84,28 @@ public protocol CancellableError: Error {
 
 extension Error {
     public var isCancelled: Bool {
-        do {
-            throw self
-        } catch AUError.cancelled {
+        if let auError = self as? AUError, case .cancelled = auError {
             return true
-        } catch let error as CancellableError {
-            return error.isCancelled
-        } catch URLError.cancelled {
-            return true
-        } catch CocoaError.userCancelled {
-            return true
-        } catch let error as NSError {
-            #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
-                let domain = error.domain
-                let code = error.code
-                return ("SKErrorDomain", 2) == (domain, code)
-            #else
-                return false
-            #endif
-        } catch {
-            return false
         }
+
+        if let cancellable = self as? CancellableError {
+            return cancellable.isCancelled
+        }
+
+        if let urlError = self as? URLError, urlError.code == .cancelled {
+            return true
+        }
+
+        if let cocoaError = self as? CocoaError, cocoaError.code == .userCancelled {
+            return true
+        }
+
+        #if os(macOS) || os(iOS) || os(tvOS) || os(watchOS)
+        let nsError = self as NSError
+        return nsError.domain == "SKErrorDomain" && nsError.code == 2
+        #else
+        return false
+        #endif
     }
 }
 

@@ -35,10 +35,11 @@ public enum AUProxyError: Error {
 }
 
 extension URLRequest {
+    @available(*, deprecated, renamed: "apply(proxy:)")
     public func applyWithThrowing(proxy: URLRequestProxy) throws -> URLRequest {
         try proxy.apply(to: self)
     }
-    
+
     public func apply(proxy: URLRequestProxy) throws -> URLRequest {
         try proxy.apply(to: self)
     }
