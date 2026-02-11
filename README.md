@@ -1,10 +1,10 @@
 # AppUpdater
 
-> **Fork Notice:** This is a simplified fork of [s1ntoneli/AppUpdater](https://github.com/s1ntoneli/AppUpdater),
+> **Fork Notice:** This is a fork of [s1ntoneli/AppUpdater](https://github.com/s1ntoneli/AppUpdater),
 > which itself is a rewrite of [mxcl/AppUpdater](https://github.com/mxcl/AppUpdater).
 >
-> This fork removes UI components and changelog localization to provide a lean,
-> headless update library. Bring your own UI.
+> This fork removes UI components and changelog localization to provide a headless update library.
+> Bring your own UI.
 
 A simple app-updater for macOS, checks your GitHub releases for a binary asset, downloads it, and provides a validated bundle ready for installation.
 
@@ -23,7 +23,7 @@ A simple app-updater for macOS, checks your GitHub releases for a binary asset, 
 
 ### Swift Package Manager
 ```swift
-package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "1.0.0"))
+package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "3.0.0"))
 ```
 
 ### Initialize
