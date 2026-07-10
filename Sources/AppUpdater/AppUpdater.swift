@@ -216,16 +216,23 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     
     /// Replaces the running app bundle with the downloaded bundle.
     /// Does NOT relaunch the app - use this for "install on quit" scenarios.
+    /// The code signature is re-validated here because the download may have
+    /// happened long before the install (e.g. install-on-quit).
     /// - Parameter downloadedAppBundle: The validated bundle to install
     /// - Returns: URL of the backup bundle (or nil if no backup was kept)
     @MainActor
-    public func replaceBundle(_ downloadedAppBundle: Bundle) throws -> URL? {
+    public func replaceBundle(_ downloadedAppBundle: Bundle) async throws -> URL? {
         trace("replaceBundle start")
         let installedAppBundle = Bundle.main
         guard let exe = downloadedAppBundle.executableURL,
               FileManager.default.fileExists(atPath: exe.path) else {
             trace("invalid downloaded bundle")
             throw Error.invalidDownloadedBundle
+        }
+
+        guard try await validateCodeSigning(.main, downloadedAppBundle) else {
+            trace("codesign mismatch at install time")
+            throw Error.codeSigningIdentity
         }
 
         let result = try FileManager.default.replaceItemAt(
@@ -242,7 +249,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
         trace("install start")
         let installedAppBundle = Bundle.main
-        _ = try replaceBundle(downloadedAppBundle)
+        _ = try await replaceBundle(downloadedAppBundle)
 
         let newAppURL = installedAppBundle.bundleURL
         let launched = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Swift.Error>) in

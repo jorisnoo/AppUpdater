@@ -93,7 +93,7 @@ func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.Termin
 
     Task { @MainActor in
         do {
-            try updater.replaceBundle(bundle)
+            try await updater.replaceBundle(bundle)
             DeferredUpdate.cleanup()
             UserDefaults.standard.removeObject(forKey: "deferredUpdate")
         } catch {
