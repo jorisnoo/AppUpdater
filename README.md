@@ -23,7 +23,7 @@ A simple app-updater for macOS, checks your GitHub releases for a binary asset, 
 
 ### Swift Package Manager
 ```swift
-package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "4.0.0"))
+package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "3.1.0"))
 ```
 
 ### Initialize

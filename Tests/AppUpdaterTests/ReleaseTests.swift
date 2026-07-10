@@ -150,6 +150,15 @@ final class ReleaseTests: XCTestCase {
         XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
     }
 
+    func testViableAssetIgnoresUnknownTarSuffix() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.tar.invalid", contentType: "application/x-gzip")]
+        )
+
+        XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
+    }
+
     func testViableAssetIgnoresUnknownContentType() throws {
         let release = makeRelease(
             tag: "1.0.0",

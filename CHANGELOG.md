@@ -1,6 +1,6 @@
 # Changelog
 
-## [4.0.0] - 2026-07-10
+## [3.1.0] - 2026-07-11
 
 ### Breaking
 - Mocks moved out of `AppUpdater` into a separate `AppUpdaterMocks` library product. Add it as a dependency of your test target and `import AppUpdaterMocks` to keep using `MockReleaseProvider`. Apps that only depend on `AppUpdater` no longer ship the mock or its JSON fixture.

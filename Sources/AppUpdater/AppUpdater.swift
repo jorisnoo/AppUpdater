@@ -159,7 +159,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
             return skipCodeSignValidation
         }
 
-        trace("comparing current: \(csi1) downloaded: \(csi2) equals? \(csi1 == csi2)")
+        trace("comparing current:", csi1 as Any, "downloaded:", csi2 as Any, "equals?", csi1 == csi2)
         return skipCodeSignValidation || (csi1 == csi2)
     }
 
@@ -209,7 +209,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     /// Does NOT relaunch the app - use this for "install on quit" scenarios.
     /// The code signature is re-validated here because the download may have
     /// happened long before the install (e.g. install-on-quit).
-    /// - Parameter downloadedAppBundle: The validated bundle to install
+    /// - Parameter downloadedAppBundle: The bundle to validate and install
     /// - Returns: URL of the backup bundle (or nil if no backup was kept)
     @MainActor
     public func replaceBundle(_ downloadedAppBundle: Bundle) async throws -> URL? {
@@ -325,10 +325,8 @@ public struct Release: Decodable, Sendable {
             case .zip:
                 return name == "\(prefix).zip"
             case .tar:
-                // "\(prefix).tar." covers .tar.gz, .tar.xz and .tar.bz2
-                return name == "\(prefix).tar"
-                    || name.hasPrefix("\(prefix).tar.")
-                    || name == "\(prefix).tgz"
+                return [".tar", ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"]
+                    .contains { name == prefix + $0 }
             case .unknown:
                 return false
             }
