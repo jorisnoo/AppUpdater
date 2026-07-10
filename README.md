@@ -10,7 +10,7 @@ A simple app-updater for macOS, checks your GitHub releases for a binary asset, 
 
 ## Caveats
 
-* Assets must be named: `\(name)-\(semanticVersion).ext`. See [Semantic Version](https://github.com/mxcl/Version)
+* Assets must be named `\(name)-\(semanticVersion)` followed by one of `.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.tar.bz2` or `.tgz`. The version may carry a leading `v`. See [Semantic Version](https://github.com/mxcl/Version)
 * Only non-sandboxed apps are supported
 
 ## Features
@@ -23,7 +23,7 @@ A simple app-updater for macOS, checks your GitHub releases for a binary asset, 
 
 ### Swift Package Manager
 ```swift
-package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "3.0.0"))
+package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "4.0.0"))
 ```
 
 ### Initialize
@@ -44,10 +44,12 @@ let updater = AppUpdater(
 
 ### Check for Updates
 ```swift
-updater.check()
+updater.check(success: { /* ... */ }, fail: { error in /* ... */ })
 ```
 
 This checks GitHub for new releases, downloads the asset if a newer version is found, validates the code signature, and transitions to the `.downloaded` state. It does **not** install the update automatically.
+
+Being already up to date is a success, not an error: the state stays `.none` and the `success` callback fires. `fail` is reserved for real problems — network failures, a bad archive, a code-sign mismatch. Concurrent calls to `check()` are deduped; while one check is in flight, further calls return immediately.
 
 ### Install an Update
 ```swift
