@@ -173,20 +173,23 @@ struct UpdateView: View {
 - **Core:** `AppUpdater` checks GitHub releases, selects a viable asset, downloads, validates code-signing, and installs.
 - **Providers:** Data source abstraction.
   - `GithubReleaseProvider` (default) talks to GitHub API and assets.
-  - `MockReleaseProvider` (testing) serves releases from bundled JSON and produces minimal .app archives for offline testing.
+  - `MockReleaseProvider` (testing) serves releases from bundled JSON and produces minimal .app archives for offline testing. It ships in the separate `AppUpdaterMocks` product, so apps that only depend on `AppUpdater` don't bundle it or its JSON fixture.
 
 ## Mock Provider & Testing
 
-Swap providers via initializer or at runtime:
+Add `AppUpdaterMocks` as a dependency of your test target, then swap providers via initializer or at runtime:
 
 ```swift
+import AppUpdater
+import AppUpdaterMocks
+
 let updater = AppUpdater(owner: "...", repo: "...", provider: GithubReleaseProvider())
 // or
 updater.provider = MockReleaseProvider()
 updater.skipCodeSignValidation = true // recommended when using mocks
 ```
 
-Mock data lives in `Sources/AppUpdater/Resources/Mocks/releases.mock.json`.
+Mock data lives in `Sources/AppUpdaterMocks/Resources/Mocks/releases.mock.json`.
 
 ### CLI Mock Runner
 

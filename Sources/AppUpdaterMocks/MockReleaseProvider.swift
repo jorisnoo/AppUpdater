@@ -1,4 +1,5 @@
 import Foundation
+import AppUpdater
 
 public final class MockReleaseProvider: ReleaseProvider, Sendable {
     public enum Source: Sendable {

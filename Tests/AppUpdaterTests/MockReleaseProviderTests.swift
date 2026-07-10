@@ -1,5 +1,6 @@
 import XCTest
 @testable import AppUpdater
+import AppUpdaterMocks
 import Version
 
 final class MockReleaseProviderTests: XCTestCase {

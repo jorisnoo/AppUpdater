@@ -1,5 +1,6 @@
 import Foundation
 import AppUpdater
+import AppUpdaterMocks
 import Combine
 
 @main

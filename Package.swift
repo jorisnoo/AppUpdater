@@ -5,13 +5,15 @@ import PackageDescription
 
 let package = Package(
     name: "AppUpdater",
-    defaultLocalization: "en",
     platforms: [.macOS(.v12)],
     products: [
         // Products define the executables and libraries a package produces, making them visible to other packages.
         .library(
             name: "AppUpdater",
             targets: ["AppUpdater"]),
+        .library(
+            name: "AppUpdaterMocks",
+            targets: ["AppUpdaterMocks"]),
         .executable(name: "AppUpdaterMockRunner", targets: ["AppUpdaterMockRunner"])
     ],
     dependencies: [
@@ -24,18 +26,22 @@ let package = Package(
             name: "AppUpdater",
             dependencies: [
                 "Version"
-            ],
+            ]
+        ),
+        .target(
+            name: "AppUpdaterMocks",
+            dependencies: ["AppUpdater"],
             resources: [
                 .process("Resources")
             ]
         ),
         .executableTarget(
             name: "AppUpdaterMockRunner",
-            dependencies: ["AppUpdater"]
+            dependencies: ["AppUpdater", "AppUpdaterMocks"]
         ),
         .testTarget(
             name: "AppUpdaterTests",
-            dependencies: ["AppUpdater"]
+            dependencies: ["AppUpdater", "AppUpdaterMocks"]
         )
     ]
 )
