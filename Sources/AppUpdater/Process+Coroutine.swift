@@ -40,24 +40,17 @@ extension Process.ProcessError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .execution(process: let task, standardOutput: _, standardError: _):
-            return "Failed executing: `\(task)` (\(task.terminationStatus))."
+            return "Failed executing: `\(Self.commandString(for: task))` (\(task.terminationStatus))."
         }
     }
-}
 
-extension Process {
-    open override var description: String {
-        let launchPath = self.launchPath ?? "$0"
-        var args = [launchPath]
-        arguments.flatMap{ args += $0 }
-        return args.map { arg in
-            if arg.contains(" ") {
+    private static func commandString(for task: Process) -> String {
+        let executable = task.executableURL?.path ?? "$0"
+        return ([executable] + (task.arguments ?? [])).map { arg in
+            if arg.isEmpty || arg.contains(" ") {
                 return "\"\(arg)\""
-            } else if arg == "" {
-                return "\"\""
-            } else {
-                return arg
             }
+            return arg
         }.joined(separator: " ")
     }
 }

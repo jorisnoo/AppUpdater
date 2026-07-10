@@ -11,26 +11,3 @@ public enum AUError: Error, LocalizedError {
         }
     }
 }
-
-public protocol CancellableError: Error {
-    var isCancelled: Bool { get }
-}
-
-extension Error {
-    public var isCancelled: Bool {
-        if let cancellable = self as? CancellableError {
-            return cancellable.isCancelled
-        }
-
-        if let urlError = self as? URLError, urlError.code == .cancelled {
-            return true
-        }
-
-        if let cocoaError = self as? CocoaError, cocoaError.code == .userCancelled {
-            return true
-        }
-
-        let nsError = self as NSError
-        return nsError.domain == "SKErrorDomain" && nsError.code == 2
-    }
-}

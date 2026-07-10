@@ -43,14 +43,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public var allowPrereleases = false
     /// Skip code signing validation (useful for mock/testing).
     public var skipCodeSignValidation = false
-    
-    private lazy var session: URLSession = {
-        let config = URLSessionConfiguration.default
-        config.shouldUseExtendedBackgroundIdleMode = true
-        config.timeoutIntervalForRequest = 3 * 60
-        
-        return URLSession(configuration: config)
-    }()
 
     public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, provider: ReleaseProvider = GithubReleaseProvider()) {
         self.owner = owner
@@ -155,9 +147,8 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         trace("viable release:", release.tagName.description, "asset:", asset.name)
         await notifyStateChanged(newState: .newVersionDetected(release, asset))
 
-        if let bundle = try await downloadAndExtract(asset: asset, release: release) {
-            await notifyStateChanged(newState: .downloaded(release, asset, bundle))
-        }
+        let bundle = try await downloadAndExtract(asset: asset, release: release)
+        await notifyStateChanged(newState: .downloaded(release, asset, bundle))
     }
 
     private func validateCodeSigning(_ b1: Bundle, _ b2: Bundle) async throws -> Bool {
@@ -172,7 +163,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         return skipCodeSignValidation || (csi1 == csi2)
     }
 
-    private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle? {
+    private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle {
         trace("update start:", release.tagName.description, asset.name)
 
         let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
@@ -393,10 +384,10 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
 
     switch contentType {
     case .tar:
-        proc.launchPath = "/usr/bin/tar"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         proc.arguments = ["xf", url.path]
     case .zip:
-        proc.launchPath = "/usr/bin/unzip"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
         proc.arguments = [url.path]
     default:
         throw AppUpdater.Error.unzipFailed
@@ -444,14 +435,14 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
 public extension Bundle {
     func isCodeSigned() async -> Bool {
         let proc = Process()
-        proc.launchPath = "/usr/bin/codesign"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         proc.arguments = ["-dv", bundlePath]
         return (try? await proc.launching()) != nil
     }
 
     func codeSigningIdentity() async throws -> String? {
         let proc = Process()
-        proc.launchPath = "/usr/bin/codesign"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         proc.arguments = ["-dvvv", bundlePath]
         
         let (_, err) = try await proc.launching()

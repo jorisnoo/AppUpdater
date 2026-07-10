@@ -6,7 +6,11 @@ public protocol ReleaseProvider {
 }
 
 public struct GithubReleaseProvider: ReleaseProvider, Sendable {
-    public init() {}
+    private let session: URLSession
+
+    public init(session: URLSession = .shared) {
+        self.session = session
+    }
 
     public func fetchReleases(owner: String, repo: String) async throws -> [Release] {
         let slug = "\(owner)/\(repo)"
@@ -14,13 +18,13 @@ public struct GithubReleaseProvider: ReleaseProvider, Sendable {
         guard let url = URL(string: urlString) else {
             throw AppUpdater.Error.invalidURL(urlString)
         }
-        guard let task = try await URLSession.shared.dataTask(with: url)?.validate() else {
+        guard let task = try await session.dataTask(with: url)?.validate() else {
             throw AUError.invalidCallingConvention
         }
         return try JSONDecoder().decode([Release].self, from: task.data)
     }
 
     public func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
-        return try await URLSession.shared.downloadTask(with: asset.downloadUrl, to: saveLocation)
+        return try await session.downloadTask(with: asset.downloadUrl, to: saveLocation)
     }
 }

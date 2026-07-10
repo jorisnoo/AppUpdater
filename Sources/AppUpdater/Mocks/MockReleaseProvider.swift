@@ -114,7 +114,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
 
     private static func shellZip(contentsOf dir: URL, into dst: URL) async throws {
         let proc = Process()
-        proc.launchPath = "/usr/bin/zip"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
         proc.currentDirectoryPath = dir.path
         proc.arguments = ["-r", dst.path, "."]
         let _ = try await proc.launching()
@@ -122,7 +122,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
 
     private static func shellTar(contentsOf dir: URL, into dst: URL) async throws {
         let proc = Process()
-        proc.launchPath = "/usr/bin/tar"
+        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
         proc.currentDirectoryPath = dir.path
         proc.arguments = ["-czf", dst.path, "."]
         let _ = try await proc.launching()

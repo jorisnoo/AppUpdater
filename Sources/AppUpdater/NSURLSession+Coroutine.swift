@@ -73,12 +73,12 @@ extension URLTaskResult {
         case 200..<300:
             return self
         case let code:
-            throw CRTHTTPError.badStatusCode(code, self.data, response)
+            throw HTTPError.badStatusCode(code, self.data, response)
         }
     }
 }
 
-public enum CRTHTTPError: Error, LocalizedError, CustomStringConvertible {
+public enum HTTPError: Error, LocalizedError, CustomStringConvertible {
     case badStatusCode(Int, Data, HTTPURLResponse)
 
     public var errorDescription: String? {
