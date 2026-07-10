@@ -83,7 +83,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         case unzipFailed
         case downloadFailed
         case pathTraversalDetected
-        case extractionTimeout
         case invalidURL(String)
         case relaunchFailed
     }
@@ -377,14 +376,14 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
     }
 
     func validateExtractedContents(in directory: URL) throws {
-        let basePath = directory.standardizedFileURL.path
+        let basePath = directory.standardizedFileURL.path + "/"
         guard let enumerator = FileManager.default.enumerator(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) else {
             return
         }
 
         while let url = enumerator.nextObject() as? URL {
             let resolved = url.resolvingSymlinksInPath().standardizedFileURL.path
-            guard resolved.hasPrefix(basePath) else {
+            guard (resolved + "/").hasPrefix(basePath) else {
                 throw AppUpdater.Error.pathTraversalDetected
             }
         }
@@ -405,8 +404,9 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
         try await Task.sleep(nanoseconds: 30_000_000_000)
         proc.terminate()
     }
+    defer { timeoutTask.cancel() }
+
     let _ = try await proc.launching()
-    timeoutTask.cancel()
 
     let extractionDir = url.deletingLastPathComponent()
     try validateExtractedContents(in: extractionDir)
