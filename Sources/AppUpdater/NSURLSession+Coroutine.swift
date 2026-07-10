@@ -17,27 +17,33 @@ extension URLSession {
         let request = convertible.request
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
-            Task(priority: .userInitiated) { [weak self] in
-                guard let self else { return }
-
-                let task = downloadTask(with: request) { tmp, rso, err in
-                    if let error = err {
+            let task = downloadTask(with: request) { tmp, rso, err in
+                if let error = err {
+                    continuation.finish(throwing: error)
+                } else if rso != nil, let tmp = tmp {
+                    do {
+                        try FileManager.default.moveItem(at: tmp, to: saveLocation)
+                        continuation.yield(.finished(saveLocation: saveLocation))
+                        continuation.finish()
+                    } catch {
                         continuation.finish(throwing: error)
-                    } else if rso != nil, let tmp = tmp {
-                        do {
-                            try FileManager.default.moveItem(at: tmp, to: saveLocation)
-                            continuation.yield(.finished(saveLocation: saveLocation))
-                            continuation.finish()
-                        } catch {
-                            continuation.finish(throwing: error)
-                        }
-                    } else {
-                        continuation.finish(throwing: AUError.invalidCallingConvention)
                     }
+                } else {
+                    continuation.finish(throwing: AUError.invalidCallingConvention)
                 }
-                continuation.yield(.progress(fractionCompleted: task.progress.fractionCompleted))
-                task.resume()
             }
+
+            let observation = task.progress.observe(\.fractionCompleted) { progress, _ in
+                continuation.yield(.progress(fractionCompleted: progress.fractionCompleted))
+            }
+
+            // Retains the observation for the stream's lifetime; without this it would
+            // be deallocated as soon as the builder returns and no progress would fire.
+            continuation.onTermination = { _ in
+                observation.invalidate()
+            }
+
+            task.resume()
         }
     }
 }
