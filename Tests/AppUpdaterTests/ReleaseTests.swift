@@ -226,6 +226,61 @@ final class ReleaseTests: XCTestCase {
         XCTAssertNotEqual(release1, release3)
     }
 
+    // MARK: - findViableUpdate
+
+    func testFindViableUpdatePicksLatestStable() throws {
+        let releases = [
+            makeRelease(tag: "1.0.0", assets: [(name: "MyApp-1.0.0.zip", contentType: "application/zip")]),
+            makeRelease(tag: "3.0.0", assets: [(name: "MyApp-3.0.0.zip", contentType: "application/zip")]),
+            makeRelease(tag: "4.0.0", assets: [(name: "MyApp-4.0.0.zip", contentType: "application/zip")], prerelease: true),
+            makeRelease(tag: "2.0.0", assets: [(name: "MyApp-2.0.0.zip", contentType: "application/zip")])
+        ]
+
+        let update = try releases.findViableUpdate(appVersion: Version(1, 0, 0), releasePrefix: "MyApp", prerelease: false)
+
+        XCTAssertEqual(update?.0.tagName, Version(3, 0, 0))
+        XCTAssertEqual(update?.1.name, "MyApp-3.0.0.zip")
+    }
+
+    func testFindViableUpdateIncludesPrereleaseWhenAllowed() throws {
+        let releases = [
+            makeRelease(tag: "3.0.0", assets: [(name: "MyApp-3.0.0.zip", contentType: "application/zip")]),
+            makeRelease(tag: "4.0.0", assets: [(name: "MyApp-4.0.0.zip", contentType: "application/zip")], prerelease: true)
+        ]
+
+        let update = try releases.findViableUpdate(appVersion: Version(1, 0, 0), releasePrefix: "MyApp", prerelease: true)
+
+        XCTAssertEqual(update?.0.tagName, Version(4, 0, 0))
+    }
+
+    func testFindViableUpdateReturnsNilWhenLatestHasNoViableAsset() throws {
+        let releases = [
+            makeRelease(tag: "1.0.0", assets: [(name: "MyApp-1.0.0.zip", contentType: "application/zip")]),
+            makeRelease(tag: "2.0.0", assets: [(name: "MyApp-2.0.0.dmg", contentType: "application/octet-stream")])
+        ]
+
+        // The newest release wins even if an older one still has a usable asset.
+        let update = try releases.findViableUpdate(appVersion: Version(1, 0, 0), releasePrefix: "MyApp", prerelease: false)
+
+        XCTAssertNil(update)
+    }
+
+    func testFindViableUpdateReturnsNilWhenAppIsCurrent() throws {
+        let releases = [
+            makeRelease(tag: "1.0.0", assets: [(name: "MyApp-1.0.0.zip", contentType: "application/zip")]),
+            makeRelease(tag: "2.0.0", assets: [(name: "MyApp-2.0.0.zip", contentType: "application/zip")])
+        ]
+
+        XCTAssertNil(try releases.findViableUpdate(appVersion: Version(2, 0, 0), releasePrefix: "MyApp", prerelease: false))
+        XCTAssertNil(try releases.findViableUpdate(appVersion: Version(3, 0, 0), releasePrefix: "MyApp", prerelease: false))
+    }
+
+    func testFindViableUpdateReturnsNilWhenNoReleases() throws {
+        let releases: [Release] = []
+
+        XCTAssertNil(try releases.findViableUpdate(appVersion: Version(1, 0, 0), releasePrefix: "MyApp", prerelease: false))
+    }
+
     // MARK: - Helpers
 
     private func makeRelease(tag: String, assets: [(name: String, contentType: String)], prerelease: Bool = false) -> Release {

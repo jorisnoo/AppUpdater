@@ -14,7 +14,7 @@ struct Runner {
             .sink { state in
                 switch state {
                 case .none:
-                    print("[MockRunner] State: none")
+                    print("[MockRunner] State: none (no update available)")
                 case .newVersionDetected(let rel, _):
                     print("[MockRunner] Detected: v\(rel.tagName)")
                     print("[MockRunner] Assets: \(rel.assets.map { $0.name })")
@@ -29,6 +29,7 @@ struct Runner {
 
         await withCheckedContinuation { (cont: CheckedContinuation<Void, Never>) in
             updater.check {
+                // Also reached when the app is already up to date.
                 print("[MockRunner] success callback")
                 cont.resume()
             } fail: { err in

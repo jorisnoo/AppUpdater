@@ -30,6 +30,10 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     @MainActor
     @Published public var lastError: Swift.Error?
 
+    /// guards against overlapping checks
+    @MainActor
+    private var isCheckInFlight = false
+
     public var onDownloadSuccess: OnSuccess? = nil
     public var onDownloadFail: OnFail? = nil
 
@@ -57,14 +61,18 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         activity = NSBackgroundActivityScheduler(identifier: "AppUpdater.\(Bundle.main.bundleIdentifier ?? "")")
         activity.repeats = true
         activity.interval = interval
-        activity.schedule { [unowned self] completion in
+        activity.schedule { [weak self] completion in
+            // invalidate() in deinit does not stop an execution that is already in flight.
+            guard let self else {
+                return completion(.finished)
+            }
             guard !self.activity.shouldDefer else {
                 return completion(.deferred)
             }
-            self.check(success: { [self] in
+            self.check(success: {
                 self.onDownloadSuccess?()
                 completion(.finished)
-            }, fail: { [self] err in
+            }, fail: { err in
                 self.onDownloadFail?(err)
                 completion(.finished)
             })
@@ -79,7 +87,6 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         case bundleExecutableURL
         case codeSigningIdentity
         case invalidDownloadedBundle
-        case noValidUpdate
         case unzipFailed
         case downloadFailed
         case pathTraversalDetected
@@ -90,6 +97,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public func check(success: OnSuccess? = nil, fail: OnFail? = nil) {
         Task {
             do {
+                await MainActor.run { self.lastError = nil }
                 try await checkThrowing()
                 success?()
             } catch {
@@ -115,6 +123,17 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     }
 
     public func checkThrowing() async throws {
+        let alreadyInFlight = await MainActor.run { () -> Bool in
+            if isCheckInFlight { return true }
+            isCheckInFlight = true
+            return false
+        }
+        guard !alreadyInFlight else {
+            trace("check already in flight, skipping")
+            return
+        }
+        defer { Task { @MainActor in self.isCheckInFlight = false } }
+
         trace("begin check for", slug)
         guard Bundle.main.executableURL != nil else {
             throw Error.bundleExecutableURL
@@ -129,7 +148,8 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
 
         guard let (release, asset) = try releases.findViableUpdate(appVersion: currentVersion, releasePrefix: self.releasePrefix, prerelease: self.allowPrereleases) else {
             trace("no viable update for", currentVersion.description, "prefix", self.releasePrefix, "prerelease", self.allowPrereleases)
-            throw Error.noValidUpdate
+            await notifyStateChanged(newState: .none)
+            return
         }
 
         trace("viable release:", release.tagName.description, "asset:", asset.name)
@@ -345,7 +365,7 @@ extension Release: Comparable {
     }
 }
 
-private extension Array where Element == Release {
+extension Array where Element == Release {
     func findViableUpdate(appVersion: Version, releasePrefix: String, prerelease: Bool) throws -> (Release, Release.Asset)? {
         let suitableReleases = prerelease ? self : filter { !$0.prerelease }
 
