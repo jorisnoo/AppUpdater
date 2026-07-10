@@ -56,6 +56,23 @@ final class ReleaseTests: XCTestCase {
         XCTAssertEqual(release.assets[0].contentType, .zip)
     }
 
+    func testDecodeReleaseWithVPrefixedTag() throws {
+        let json = """
+        {
+            "tag_name": "v1.2.3",
+            "prerelease": false,
+            "assets": [],
+            "body": "",
+            "name": "v1.2.3",
+            "html_url": "https://example.com"
+        }
+        """
+        let data = json.data(using: .utf8)!
+        let release = try JSONDecoder().decode(Release.self, from: data)
+
+        XCTAssertEqual(release.tagName, Version(1, 2, 3))
+    }
+
     func testDecodeReleaseWithInvalidVersion() throws {
         let json = """
         {
@@ -89,12 +106,57 @@ final class ReleaseTests: XCTestCase {
     func testViableAssetMatchesTar() throws {
         let release = makeRelease(
             tag: "1.0.0",
-            assets: [(name: "MyApp-1.0.0.tar.tar", contentType: "application/x-gzip")]
+            assets: [(name: "MyApp-1.0.0.tar.gz", contentType: "application/x-gzip")]
         )
         let asset = release.viableAsset(forRelease: "MyApp")
 
         XCTAssertNotNil(asset)
-        XCTAssertEqual(asset?.name, "MyApp-1.0.0.tar.tar")
+        XCTAssertEqual(asset?.name, "MyApp-1.0.0.tar.gz")
+    }
+
+    func testViableAssetMatchesTarGzWithGzipContentType() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.tar.gz", contentType: "application/gzip")]
+        )
+
+        XCTAssertEqual(release.viableAsset(forRelease: "MyApp")?.name, "MyApp-1.0.0.tar.gz")
+    }
+
+    func testViableAssetMatchesPlainTar() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.tar", contentType: "application/x-tar")]
+        )
+
+        XCTAssertEqual(release.viableAsset(forRelease: "MyApp")?.name, "MyApp-1.0.0.tar")
+    }
+
+    func testViableAssetMatchesTgz() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.tgz", contentType: "application/x-gzip")]
+        )
+
+        XCTAssertEqual(release.viableAsset(forRelease: "MyApp")?.name, "MyApp-1.0.0.tgz")
+    }
+
+    func testViableAssetIgnoresBareGz() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.gz", contentType: "application/x-gzip")]
+        )
+
+        XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
+    }
+
+    func testViableAssetIgnoresUnknownContentType() throws {
+        let release = makeRelease(
+            tag: "1.0.0",
+            assets: [(name: "MyApp-1.0.0.zip", contentType: "application/octet-stream")]
+        )
+
+        XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
     }
 
     func testViableAssetIgnoresWrongPrefix() throws {
@@ -132,7 +194,7 @@ final class ReleaseTests: XCTestCase {
             tag: "1.0.0",
             assets: [
                 (name: "MyApp-1.0.0.zip", contentType: "application/zip"),
-                (name: "MyApp-1.0.0.tar.tar", contentType: "application/x-gzip")
+                (name: "MyApp-1.0.0.tar.gz", contentType: "application/x-gzip")
             ]
         )
         let asset = release.viableAsset(forRelease: "MyApp")

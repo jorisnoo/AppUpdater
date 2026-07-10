@@ -31,6 +31,20 @@ final class ContentTypeTests: XCTestCase {
         XCTAssertEqual(contentType, .tar)
     }
 
+    func testDecodeGzip() throws {
+        let json = "\"application/gzip\""
+        let contentType = try JSONDecoder().decode(ContentType.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(contentType, .tar)
+    }
+
+    func testDecodeXTar() throws {
+        let json = "\"application/x-tar\""
+        let contentType = try JSONDecoder().decode(ContentType.self, from: json.data(using: .utf8)!)
+
+        XCTAssertEqual(contentType, .tar)
+    }
+
     func testDecodeUnknown() throws {
         let json = "\"application/octet-stream\""
         let contentType = try JSONDecoder().decode(ContentType.self, from: json.data(using: .utf8)!)

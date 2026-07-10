@@ -289,7 +289,8 @@ public struct Release: Decodable, Sendable {
 
     public init(from decoder: any Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
-        self.tagName = (try? container.decodeIfPresent(Version.self, forKey: .tagName)) ?? .null
+        let rawTagName = try container.decodeIfPresent(String.self, forKey: .tagName)
+        self.tagName = rawTagName.flatMap(Version.init(tolerant:)) ?? .null
         self.prerelease = try container.decode(Bool.self, forKey: .prerelease)
         self.assets = try container.decode([Release.Asset].self, forKey: .assets)
         self.body = try container.decode(String.self, forKey: .body)
@@ -298,17 +299,20 @@ public struct Release: Decodable, Sendable {
     }
 
     func viableAsset(forRelease releasePrefix: String) -> Asset? {
-        return assets.first { asset in
-            let prefix = "\(releasePrefix.lowercased())-\(tagName)"
-            let assetName = (asset.name as NSString).deletingPathExtension.lowercased()
-            let fileExtension = (asset.name as NSString).pathExtension
+        let prefix = "\(releasePrefix.lowercased())-\(tagName)"
 
-            switch (assetName, asset.contentType, fileExtension) {
-            case ("\(prefix).tar", .tar, "tar"):
-                return true
-            case (prefix, .zip, "zip"):
-                return true
-            default:
+        return assets.first { asset in
+            let name = asset.name.lowercased()
+
+            switch asset.contentType {
+            case .zip:
+                return name == "\(prefix).zip"
+            case .tar:
+                // "\(prefix).tar." covers .tar.gz, .tar.xz and .tar.bz2
+                return name == "\(prefix).tar"
+                    || name.hasPrefix("\(prefix).tar.")
+                    || name == "\(prefix).tgz"
+            case .unknown:
                 return false
             }
         }
@@ -318,7 +322,7 @@ public struct Release: Decodable, Sendable {
 public enum ContentType: Decodable, Sendable {
     public init(from decoder: Decoder) throws {
         switch try decoder.singleValueContainer().decode(String.self) {
-        case "application/x-bzip2", "application/x-xz", "application/x-gzip":
+        case "application/x-bzip2", "application/x-xz", "application/x-gzip", "application/gzip", "application/x-tar":
             self = .tar
         case "application/zip":
             self = .zip
