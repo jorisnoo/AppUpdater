@@ -22,6 +22,10 @@ extension URLSession {
                     continuation.finish(throwing: error)
                 } else if rso != nil, let tmp = tmp {
                     do {
+                        if let response = rso as? HTTPURLResponse, !(200..<300).contains(response.statusCode) {
+                            let body = (try? Data(contentsOf: tmp)) ?? Data()
+                            throw HTTPError.badStatusCode(response.statusCode, body, response)
+                        }
                         try FileManager.default.moveItem(at: tmp, to: saveLocation)
                         continuation.yield(.finished(saveLocation: saveLocation))
                         continuation.finish()
@@ -39,8 +43,9 @@ extension URLSession {
 
             // Retains the observation for the stream's lifetime; without this it would
             // be deallocated as soon as the builder returns and no progress would fire.
-            continuation.onTermination = { _ in
+            continuation.onTermination = { reason in
                 observation.invalidate()
+                if case .cancelled = reason { task.cancel() }
             }
 
             task.resume()

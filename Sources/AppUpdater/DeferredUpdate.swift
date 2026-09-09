@@ -26,7 +26,10 @@ public struct DeferredUpdate: Codable, Sendable {
     /// Loads the bundle from the stored path.
     /// Returns nil if the bundle no longer exists or is invalid.
     public func loadBundle() -> Bundle? {
-        Bundle(url: URL(fileURLWithPath: bundlePath))
+        guard let bundle = Bundle(url: URL(fileURLWithPath: bundlePath)),
+              let executable = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: executable.path) else { return nil }
+        return bundle
     }
 
     /// Returns true if the deferred update bundle still exists at the stored path.
@@ -69,10 +72,17 @@ public extension DeferredUpdate {
     /// - Returns: URL where the bundle was persisted
     static func persistBundle(_ bundle: Bundle, to directory: URL? = nil) throws -> URL {
         let destDir = try directory ?? pendingUpdatesDirectory()
-        let destination = destDir.appendingPathComponent("Update.app")
-
-        try? FileManager.default.removeItem(at: destination)
-        try FileManager.default.copyItem(at: bundle.bundleURL, to: destination)
+        let destination = destDir.appendingPathComponent("Update.app", isDirectory: true)
+        if bundle.bundleURL.resolvingSymlinksInPath().path == destination.resolvingSymlinksInPath().path { return destination }
+        try FileManager.default.createDirectory(at: destDir, withIntermediateDirectories: true)
+        let staging = destDir.appendingPathComponent(UUID().uuidString + ".app")
+        defer { try? FileManager.default.removeItem(at: staging) }
+        try FileManager.default.copyItem(at: bundle.bundleURL, to: staging)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            _ = try FileManager.default.replaceItemAt(destination, withItemAt: staging, options: .usingNewMetadataOnly)
+        } else {
+            try FileManager.default.moveItem(at: staging, to: destination)
+        }
 
         return destination
     }

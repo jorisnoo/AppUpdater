@@ -3,11 +3,13 @@ import AppKit
 @preconcurrency import Version
 import OSLog
 
-public final class AppUpdater: ObservableObject, @unchecked Sendable {
-    public typealias OnSuccess = @Sendable () -> Void
-    public typealias OnFail = @Sendable (Swift.Error) -> Void
+@MainActor
+public final class AppUpdater: ObservableObject {
+    public typealias OnSuccess = @MainActor @Sendable () -> Void
+    public typealias OnFail = @MainActor @Sendable (Swift.Error) -> Void
 
-    let activity: NSBackgroundActivityScheduler
+    // Configuration and use are main-actor isolated; deinit only invalidates it.
+    nonisolated(unsafe) private let activity: NSBackgroundActivityScheduler
     let owner: String
     let repo: String
     let releasePrefix: String
@@ -19,20 +21,20 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     public var provider: ReleaseProvider
 
     /// update state
-    @MainActor
     @Published public var state: UpdateState = .none
 
     /// all releases
-    @MainActor
     @Published public var releases: [Release] = []
 
     /// last error captured for diagnostics
-    @MainActor
     @Published public var lastError: Swift.Error?
 
     /// guards against overlapping checks
-    @MainActor
-    private var isCheckInFlight = false
+    @Published public private(set) var isChecking = false
+    @Published public private(set) var isInstalling = false
+    private var checkTask: Task<Void, Swift.Error>?
+    var installedBundle = Bundle.main
+    private var downloadDirectory: URL?
 
     public var onDownloadSuccess: OnSuccess? = nil
     public var onDownloadFail: OnFail? = nil
@@ -44,7 +46,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     /// Skip code signing validation (useful for mock/testing).
     public var skipCodeSignValidation = false
 
-    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, provider: ReleaseProvider = GithubReleaseProvider()) {
+    public init(owner: String, repo: String, releasePrefix: String? = nil, interval: TimeInterval = 24 * 60 * 60, provider: ReleaseProvider = GithubReleaseProvider(), automaticallyChecks: Bool = true) {
         self.owner = owner
         self.repo = repo
         self.releasePrefix = releasePrefix ?? repo
@@ -53,29 +55,29 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         activity = NSBackgroundActivityScheduler(identifier: "AppUpdater.\(Bundle.main.bundleIdentifier ?? "")")
         activity.repeats = true
         activity.interval = interval
-        activity.schedule { [weak self] completion in
-            // invalidate() in deinit does not stop an execution that is already in flight.
-            guard let self else {
-                return completion(.finished)
+        if automaticallyChecks {
+            activity.schedule { [weak self] completion in
+                Task { @MainActor in
+                    guard let self else { return completion(.finished) }
+                    guard !self.activity.shouldDefer else { return completion(.deferred) }
+                    do {
+                        try await self.checkThrowing()
+                        self.onDownloadSuccess?()
+                    } catch {
+                        self.onDownloadFail?(error)
+                    }
+                    completion(.finished)
+                }
             }
-            guard !self.activity.shouldDefer else {
-                return completion(.deferred)
-            }
-            self.check(success: {
-                self.onDownloadSuccess?()
-                completion(.finished)
-            }, fail: { err in
-                self.onDownloadFail?(err)
-                completion(.finished)
-            })
         }
     }
 
     deinit {
         activity.invalidate()
+        if let downloadDirectory { try? FileManager.default.removeItem(at: downloadDirectory) }
     }
 
-    public enum Error: Swift.Error {
+    public enum Error: Swift.Error, LocalizedError {
         case bundleExecutableURL
         case codeSigningIdentity
         case invalidDownloadedBundle
@@ -84,29 +86,40 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         case pathTraversalDetected
         case invalidURL(String)
         case relaunchFailed
+        case installationInProgress
+        case incompatibleUpdate
+
+        public var errorDescription: String? {
+            switch self {
+            case .bundleExecutableURL, .invalidDownloadedBundle: return "The update does not contain a valid application."
+            case .codeSigningIdentity: return "The update's signature or application identity could not be verified."
+            case .unzipFailed: return "The update archive could not be extracted."
+            case .downloadFailed: return "The update download did not complete."
+            case .pathTraversalDetected: return "The update archive contains unsafe paths."
+            case .invalidURL: return "The update URL is invalid."
+            case .relaunchFailed: return "The updated app could not be launched."
+            case .installationInProgress: return "An update is already being installed."
+            case .incompatibleUpdate: return "This update is not newer than the installed app, or requires a newer version of macOS."
+            }
+        }
     }
     
     public func check(success: OnSuccess? = nil, fail: OnFail? = nil) {
         Task {
             do {
-                await MainActor.run { self.lastError = nil }
                 try await checkThrowing()
                 success?()
             } catch {
                 trace("check failed:", String(describing: error))
-                Task { @MainActor in self.lastError = error }
                 fail?(error)
             }
         }
     }
     
-    @MainActor
     public func install(_ appBundle: Bundle, success: OnSuccess? = nil, fail: OnFail? = nil) {
         Task { @MainActor in
             do {
-                try await installThrowing(appBundle)
-                success?()
-                onInstallSuccess?()
+                try await performInstallation(appBundle, success: success)
             } catch {
                 fail?(error)
                 onInstallFail?(error)
@@ -115,58 +128,78 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
     }
 
     public func checkThrowing() async throws {
-        let alreadyInFlight = await MainActor.run { () -> Bool in
-            if isCheckInFlight { return true }
-            isCheckInFlight = true
-            return false
-        }
-        guard !alreadyInFlight else {
-            trace("check already in flight, skipping")
+        guard !isInstalling else { throw Error.installationInProgress }
+        if let checkTask {
+            try await checkTask.value
             return
         }
-        defer { Task { @MainActor in self.isCheckInFlight = false } }
+        isChecking = true
+        lastError = nil
+        let previousState = state
+        let task = Task {
+            defer {
+                self.checkTask = nil
+                self.isChecking = false
+            }
+            do { try await self.performCheck() }
+            catch {
+                self.state = previousState
+                self.lastError = error
+                throw error
+            }
+        }
+        checkTask = task
+        try await task.value
+    }
 
+    private func performCheck() async throws {
         trace("begin check for", slug)
-        guard Bundle.main.executableURL != nil else {
+        guard installedBundle.executableURL != nil else {
             throw Error.bundleExecutableURL
         }
-        let currentVersion = Bundle.main.version
+        let currentVersion = installedBundle.version
 
         trace("fetch releases")
         let releases = try await provider.fetchReleases(owner: owner, repo: repo)
         trace("fetched releases count:", releases.count)
 
-        await notifyReleasesDidChange(releases)
+        notifyReleasesDidChange(releases)
 
         guard let (release, asset) = try releases.findViableUpdate(appVersion: currentVersion, releasePrefix: self.releasePrefix, prerelease: self.allowPrereleases) else {
             trace("no viable update for", currentVersion.description, "prefix", self.releasePrefix, "prerelease", self.allowPrereleases)
-            await notifyStateChanged(newState: .none)
+            notifyStateChanged(newState: .none)
             return
         }
 
+        if case .downloaded(let cached, _, let bundle) = state,
+           cached.tagName == release.tagName,
+           let executable = bundle.executableURL,
+           FileManager.default.fileExists(atPath: executable.path) { return }
+
         trace("viable release:", release.tagName.description, "asset:", asset.name)
-        await notifyStateChanged(newState: .newVersionDetected(release, asset))
+        notifyStateChanged(newState: .newVersionDetected(release, asset))
 
         let bundle = try await downloadAndExtract(asset: asset, release: release)
-        await notifyStateChanged(newState: .downloaded(release, asset, bundle))
+        notifyStateChanged(newState: .downloaded(release, asset, bundle))
     }
 
-    private func validateCodeSigning(_ b1: Bundle, _ b2: Bundle) async throws -> Bool {
-        let csi1 = try? await b1.codeSigningIdentity()
-        let csi2 = try? await b2.codeSigningIdentity()
-
-        if csi1 == nil || csi2 == nil {
-            return skipCodeSignValidation
-        }
-
-        trace("comparing current:", csi1 as Any, "downloaded:", csi2 as Any, "equals?", csi1 == csi2)
-        return skipCodeSignValidation || (csi1 == csi2)
+    private func validateCodeSigning(_ current: Bundle, _ downloaded: Bundle) async throws -> Bool {
+        if skipCodeSignValidation { return true }
+        let currentURL = current.bundleURL
+        let downloadedURL = downloaded.bundleURL
+        return try await Task.detached {
+            try Bundle.validateUpdate(at: downloadedURL, against: currentURL)
+            return true
+        }.value
     }
 
     private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle {
         trace("update start:", release.tagName.description, asset.name)
 
-        let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: Bundle.main.bundleURL, create: true)
+        let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: installedBundle.bundleURL, create: true)
+
+        var keepBundle = false
+        defer { if !keepBundle { try? FileManager.default.removeItem(at: tmpdir) } }
 
         let downloadState = try await provider.download(asset: asset, to: tmpdir.appendingPathComponent("download"))
 
@@ -175,7 +208,7 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
             switch state {
             case .progress(let fraction):
                 trace("downloading", Int(fraction * 100), "%")
-                await notifyStateChanged(newState: .downloading(release, asset, fraction: fraction))
+                notifyStateChanged(newState: .downloading(release, asset, fraction: fraction))
             case .finished(let saveLocation):
                 trace("download finished at", saveLocation.path)
                 dst = saveLocation
@@ -196,8 +229,12 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
             throw Error.invalidDownloadedBundle
         }
 
-        if try await validateCodeSigning(.main, downloadedAppBundle) {
-            trace("codesign validated ok")
+        if try await validateCodeSigning(installedBundle, downloadedAppBundle) {
+            try validateVersion(downloadedAppBundle, expected: release.tagName)
+            try? FileManager.default.removeItem(at: dst)
+            discardTemporaryDownload()
+            downloadDirectory = tmpdir
+            keepBundle = true
             return downloadedAppBundle
         } else {
             trace("codesign mismatch")
@@ -205,71 +242,99 @@ public final class AppUpdater: ObservableObject, @unchecked Sendable {
         }
     }
     
-    /// Replaces the running app bundle with the downloaded bundle.
-    /// Does NOT relaunch the app - use this for "install on quit" scenarios.
-    /// The code signature is re-validated here because the download may have
-    /// happened long before the install (e.g. install-on-quit).
-    /// - Parameter downloadedAppBundle: The bundle to validate and install
-    /// - Returns: URL of the backup bundle (or nil if no backup was kept)
-    @MainActor
-    public func replaceBundle(_ downloadedAppBundle: Bundle) async throws -> URL? {
-        trace("replaceBundle start")
-        let installedAppBundle = Bundle.main
-        guard let exe = downloadedAppBundle.executableURL,
-              FileManager.default.fileExists(atPath: exe.path) else {
-            trace("invalid downloaded bundle")
+    func discardTemporaryDownload() {
+        if let downloadDirectory { try? FileManager.default.removeItem(at: downloadDirectory) }
+        downloadDirectory = nil
+    }
+
+    private func validateVersion(_ bundle: Bundle, expected: Version? = nil) throws {
+        guard let exe = bundle.executableURL,
+              FileManager.default.isExecutableFile(atPath: exe.path) else {
             throw Error.invalidDownloadedBundle
         }
-
-        guard try await validateCodeSigning(.main, downloadedAppBundle) else {
-            trace("codesign mismatch at install time")
-            throw Error.codeSigningIdentity
-        }
-
-        let result = try FileManager.default.replaceItemAt(
-            installedAppBundle.bundleURL,
-            withItemAt: downloadedAppBundle.bundleURL,
-            backupItemName: "backup.app",
-            options: .usingNewMetadataOnly
-        )
-        trace("bundle replaced without relaunch")
-        return result
-    }
-
-    @MainActor
-    public func installThrowing(_ downloadedAppBundle: Bundle) async throws {
-        trace("install start")
-        let installedAppBundle = Bundle.main
-        _ = try await replaceBundle(downloadedAppBundle)
-
-        let newAppURL = installedAppBundle.bundleURL
-        let launched = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Bool, Swift.Error>) in
-            let configuration = NSWorkspace.OpenConfiguration()
-            configuration.createsNewApplicationInstance = true
-
-            NSWorkspace.shared.openApplication(at: newAppURL, configuration: configuration) { app, error in
-                if let error = error {
-                    continuation.resume(throwing: error)
-                } else {
-                    continuation.resume(returning: app != nil)
-                }
+        // Mock archives deliberately contain a placeholder version and executable.
+        guard !skipCodeSignValidation else { return }
+        guard bundle.updateVersion > installedBundle.version,
+              expected == nil || bundle.updateVersion == expected else { throw Error.incompatibleUpdate }
+        if let minimum = bundle.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String {
+            let os = ProcessInfo.processInfo.operatingSystemVersion
+            let running = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
+            guard running.compare(minimum, options: .numeric) != .orderedAscending else {
+                throw Error.incompatibleUpdate
             }
         }
-
-        guard launched else {
-            throw Error.relaunchFailed
-        }
-
-        trace("new app launched, terminating old instance")
-        NSApp.terminate(self)
     }
-    
-    @MainActor
+
+    /// Installs without relaunching. The source remains available if installation fails.
+    /// Returns the installed application's URL.
+    @discardableResult
+    public func replaceBundle(_ bundle: Bundle) async throws -> URL? {
+        guard !isInstalling, !isChecking else { throw Error.installationInProgress }
+        isInstalling = true
+        defer { isInstalling = false }
+        let backup = try await replaceValidatedBundle(bundle)
+        try? FileManager.default.removeItem(at: backup)
+        state = .none
+        return installedBundle.bundleURL
+    }
+
+    private func replaceValidatedBundle(_ bundle: Bundle) async throws -> URL {
+        try validateVersion(bundle)
+        let destination = installedBundle.bundleURL
+        let staging = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: destination, create: true)
+        defer { try? FileManager.default.removeItem(at: staging) }
+        let stagedURL = staging.appendingPathComponent(destination.lastPathComponent)
+        try FileManager.default.copyItem(at: bundle.bundleURL, to: stagedURL)
+        guard let staged = Bundle(url: stagedURL),
+              try await validateCodeSigning(installedBundle, staged) else { throw Error.codeSigningIdentity }
+        try validateVersion(staged)
+        let backupName = ".\(destination.lastPathComponent).\(UUID().uuidString).backup"
+        _ = try FileManager.default.replaceItemAt(destination, withItemAt: stagedURL, backupItemName: backupName,
+                                                  options: [.usingNewMetadataOnly, .withoutDeletingBackupItem])
+        return destination.deletingLastPathComponent().appendingPathComponent(backupName)
+    }
+
+    /// Replaces, confirms launch, and terminates. Restores the old app if launch fails.
+    public func installThrowing(_ bundle: Bundle) async throws {
+        try await performInstallation(bundle, success: nil)
+    }
+
+    private func performInstallation(_ bundle: Bundle, success: OnSuccess?) async throws {
+        guard !isInstalling, !isChecking else { throw Error.installationInProgress }
+        isInstalling = true
+        defer { isInstalling = false }
+        let backup = try await replaceValidatedBundle(bundle)
+        do {
+            try await launchApplication(installedBundle.bundleURL)
+        } catch {
+            _ = try FileManager.default.replaceItemAt(installedBundle.bundleURL, withItemAt: backup, options: .usingNewMetadataOnly)
+            throw error
+        }
+        try? FileManager.default.removeItem(at: backup)
+        state = .none
+        success?()
+        onInstallSuccess?()
+        terminateApplication()
+    }
+
+    // Internal seams let installation tests exercise rollback without launching or quitting apps.
+    var terminateApplication: () -> Void = { NSApp.terminate(nil) }
+    var launchApplication: (URL) async throws -> Void = { url in
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.createsNewApplicationInstance = true
+            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, error in
+                if let error { continuation.resume(throwing: error) }
+                else if app != nil { continuation.resume() }
+                else { continuation.resume(throwing: Error.relaunchFailed) }
+            }
+        }
+    }
+
     private func notifyStateChanged(newState: UpdateState) {
         state = newState
     }
 
-    @MainActor
     private func notifyReleasesDidChange(_ releases: [Release]) {
         self.releases = releases
     }
@@ -310,8 +375,8 @@ public struct Release: Decodable, Sendable {
         self.tagName = rawTagName.flatMap(Version.init(tolerant:)) ?? .null
         self.prerelease = try container.decode(Bool.self, forKey: .prerelease)
         self.assets = try container.decode([Release.Asset].self, forKey: .assets)
-        self.body = try container.decode(String.self, forKey: .body)
-        self.name = try container.decode(String.self, forKey: .name)
+        self.body = try container.decodeIfPresent(String.self, forKey: .body) ?? ""
+        self.name = try container.decodeIfPresent(String.self, forKey: .name) ?? rawTagName ?? ""
         self.htmlUrl = try container.decode(String.self, forKey: .htmlUrl)
     }
 
@@ -375,21 +440,25 @@ extension Array where Element == Release {
     }
 }
 
-private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
+func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
 
     let proc = Process()
     proc.currentDirectoryURL = url.deletingLastPathComponent()
 
-    switch contentType {
-    case .tar:
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
-        proc.arguments = ["xf", url.path]
-    case .zip:
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/unzip")
-        proc.arguments = [url.path]
-    default:
-        throw AppUpdater.Error.unzipFailed
+    guard contentType != .unknown else { throw AppUpdater.Error.unzipFailed }
+    // macOS bsdtar reads both zip and tar. Its default extraction rejects writes
+    // through symlinks and paths containing ".." (never enable -P).
+    let listing = Process()
+    listing.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+    listing.arguments = ["-tf", url.path]
+    let (contents, _) = try await listing.launching()
+    for path in String(decoding: contents, as: UTF8.self).split(separator: "\n") {
+        guard !path.hasPrefix("/"), !path.split(separator: "/").contains("..") else {
+            throw AppUpdater.Error.pathTraversalDetected
+        }
     }
+    proc.executableURL = URL(fileURLWithPath: "/usr/bin/tar")
+    proc.arguments = ["-xf", url.path, "--no-same-owner"]
 
     func validateExtractedContents(in directory: URL) throws {
         let basePath = directory.standardizedFileURL.path + "/"
@@ -405,53 +474,23 @@ private func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
         }
     }
 
-    func findApp() async throws -> URL? {
-        let cnts = try FileManager.default.contentsOfDirectory(at: url.deletingLastPathComponent(), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey], options: .skipsSubdirectoryDescendants)
-        for url in cnts {
-            guard url.pathExtension == "app" else { continue }
-            let resourceValues = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
-            guard resourceValues.isDirectory == true, resourceValues.isSymbolicLink != true else { continue }
-            return url
+    func findApp() throws -> URL? {
+        let contents = try FileManager.default.contentsOfDirectory(at: url.deletingLastPathComponent(), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        let apps = try contents.filter { url in
+            guard url.pathExtension == "app" else { return false }
+            let values = try url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+            return values.isDirectory == true && values.isSymbolicLink != true
         }
-        return nil
+        guard apps.count == 1 else { throw AppUpdater.Error.invalidDownloadedBundle }
+        return apps.first
     }
 
-    let timeoutTask = Task {
-        try await Task.sleep(nanoseconds: 30_000_000_000)
-        proc.terminate()
-    }
-    defer { timeoutTask.cancel() }
-
-    let _ = try await proc.launching()
+    _ = try await proc.launching(timeout: 120)
 
     let extractionDir = url.deletingLastPathComponent()
     try validateExtractedContents(in: extractionDir)
 
-    return try await findApp()
-}
-
-public extension Bundle {
-    func isCodeSigned() async -> Bool {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        proc.arguments = ["-dv", bundlePath]
-        return (try? await proc.launching()) != nil
-    }
-
-    func codeSigningIdentity() async throws -> String? {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-        proc.arguments = ["-dvvv", bundlePath]
-        
-        let (_, err) = try await proc.launching()
-        guard let errInfo = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)?.split(separator: "\n") else {
-            return nil
-        }
-        let result = errInfo.filter { $0.hasPrefix("Authority=") }
-            .first.map { String($0.dropFirst(10)) }
-
-        return result
-    }
+    return try findApp()
 }
 
 // MARK: - Debug Trace helper

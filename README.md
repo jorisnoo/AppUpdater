@@ -1,226 +1,135 @@
 # AppUpdater
 
-> **Fork Notice:** This is a fork of [s1ntoneli/AppUpdater](https://github.com/s1ntoneli/AppUpdater),
-> which itself is a rewrite of [mxcl/AppUpdater](https://github.com/mxcl/AppUpdater).
->
-> This fork removes UI components and changelog localization to provide a headless update library.
-> Bring your own UI.
+A macOS updater for non-sandboxed apps distributed through GitHub releases. Use the shared `AppUpdateController` for consistent behavior across apps, or use the `AppUpdater` core with your own UI.
 
-A simple app-updater for macOS, checks your GitHub releases for a binary asset, downloads it, and provides a validated bundle ready for installation.
+This is a fork of [s1ntoneli/AppUpdater](https://github.com/s1ntoneli/AppUpdater), originally based on [mxcl/AppUpdater](https://github.com/mxcl/AppUpdater).
 
-## Caveats
+## Standard app integration
 
-* Assets must be named `\(name)-\(semanticVersion)` followed by one of `.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.tar.bz2` or `.tgz`. The version may carry a leading `v`. See [Semantic Version](https://github.com/mxcl/Version)
-* Only non-sandboxed apps are supported
+All four local consumers—Batzen, Harvie, RealExporter, and GDSPlayer—use this integration:
 
-## Features
-
-* Full semantic versioning support: we understand alpha/beta etc.
-* We check that the code-sign identity of the download matches the running app before updating.
-* We support zip files or tarballs.
-
-## Usage
-
-### Swift Package Manager
-```swift
-package.dependencies.append(.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "3.1.0"))
-```
-
-### Initialize
-```swift
-let updater = AppUpdater(owner: "yourname", repo: "YourApp")
-```
-
-**Full initializer:**
-```swift
-let updater = AppUpdater(
-    owner: "yourname",
-    repo: "YourApp",
-    releasePrefix: "YourApp",      // defaults to repo name
-    interval: 24 * 60 * 60,        // background check interval in seconds
-    provider: GithubReleaseProvider()
-)
-```
-
-### Check for Updates
-```swift
-updater.check(success: { /* ... */ }, fail: { error in /* ... */ })
-```
-
-This checks GitHub for new releases, downloads the asset if a newer version is found, validates the code signature, and transitions to the `.downloaded` state. It does **not** install the update automatically.
-
-Being already up to date is a success, not an error: the state stays `.none` and the `success` callback fires. `fail` is reserved for real problems — network failures, a bad archive, a code-sign mismatch. Concurrent calls to `check()` are deduped; while one check is in flight, further calls return immediately.
-
-### Install an Update
-```swift
-// Get the bundle from the downloaded state
-if case .downloaded(_, _, let bundle) = updater.state {
-    updater.install(bundle)
-}
-```
-
-The `install(_:)` method replaces the running app with the downloaded bundle and relaunches.
-
-### Deferred Updates (Install on Quit)
-
-For a better user experience, you can defer updates and install them when the user quits:
-
-1. **On download completion**, store the update for later:
-```swift
-if case .downloaded(let release, let asset, let bundle) = updater.state {
-    // Persist bundle to stable location (temp directory may be cleaned)
-    let persistedURL = try DeferredUpdate.persistBundle(bundle)
-
-    // Create and store the deferred update info
-    let deferred = DeferredUpdate(
-        bundlePath: persistedURL.path,
-        releaseVersion: release.tagName.description,
-        releaseName: release.name,
-        assetName: asset.name
-    )
-
-    // Store in UserDefaults (or your preferred storage)
-    UserDefaults.standard.set(try? JSONEncoder().encode(deferred), forKey: "deferredUpdate")
-}
-```
-
-2. **In `applicationShouldTerminate`**, install without relaunch:
-```swift
-func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-    guard let data = UserDefaults.standard.data(forKey: "deferredUpdate"),
-          let deferred = try? JSONDecoder().decode(DeferredUpdate.self, from: data),
-          let bundle = deferred.loadBundle() else {
-        return .terminateNow
-    }
-
-    Task { @MainActor in
-        do {
-            try await updater.replaceBundle(bundle)
-            DeferredUpdate.cleanup()
-            UserDefaults.standard.removeObject(forKey: "deferredUpdate")
-        } catch {
-            // Log error but still quit
-        }
-        sender.reply(toApplicationShouldTerminate: true)
-    }
-
-    return .terminateLater
-}
-```
-
-The app quits normally; the next launch uses the new version.
-
-3. **On app launch**, validate the deferred update still exists (the bundle may have been deleted):
-```swift
-func applicationDidFinishLaunching(_ notification: Notification) {
-    // Validate deferred update bundle still exists
-    if let data = UserDefaults.standard.data(forKey: "deferredUpdate"),
-       let deferred = try? JSONDecoder().decode(DeferredUpdate.self, from: data),
-       !deferred.isValid {
-        // Bundle was deleted, clear the stale preference
-        UserDefaults.standard.removeObject(forKey: "deferredUpdate")
-        DeferredUpdate.cleanup()
-    }
-}
-```
-
-## Update Flow
-
-AppUpdater uses a state machine to track progress:
-
-```
-.none → .newVersionDetected → .downloading → .downloaded
-```
-
-| State | Description |
-|-------|-------------|
-| `.none` | No update available or not yet checked |
-| `.newVersionDetected(release, asset)` | A newer version was found, download starting |
-| `.downloading(release, asset, fraction)` | Download in progress (0.0 to 1.0) |
-| `.downloaded(release, asset, bundle)` | Ready to install; bundle is validated |
-
-### SwiftUI Example
+- Release builds check on launch and periodically, approximately every 24 hours. macOS may defer background checks.
+- Automatic checks download and validate silently, then save the update for installation on quit.
+- **Check for Updates…** shows an update dialog, an up-to-date message, or an error.
+- The update dialog offers **Restart Now** and **Install on Quit**. A saved update also appears as **Restart and Update** in the menu.
+- Pending updates survive restarts and failed checks. Failed installs retain the update for retry.
+- Debug builds do not check automatically. Manual checks remain available; production signature requirements still apply.
+- App Store builds exclude the integration with `#if !APP_STORE`.
 
 ```swift
-import SwiftUI
+import AppKit
+#if !APP_STORE
 import AppUpdater
+#endif
 
-struct UpdateView: View {
-    @ObservedObject var updater: AppUpdater
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    #if !APP_STORE
+    let updates = AppUpdateController(owner: "yourname", repo: "YourApp")
 
-    var body: some View {
-        switch updater.state {
-        case .none:
-            Text("No updates available")
-        case .newVersionDetected(let release, _):
-            Text("Found \(release.tagName.description)")
-        case .downloading(_, _, let fraction):
-            ProgressView(value: fraction)
-        case .downloaded(let release, _, let bundle):
-            VStack {
-                Text("Ready to install \(release.tagName.description)")
-                Button("Install & Restart") {
-                    updater.install(bundle)
-                }
-            }
-        }
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        updates.start()
     }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        updates.applicationShouldTerminate(sender)
+    }
+    #endif
 }
 ```
 
-**AppUpdater is an ObservableObject**, observe the `state` property to build your own update UI.
-
-## Architecture
-
-- **Core:** `AppUpdater` checks GitHub releases, selects a viable asset, downloads, validates code-signing, and installs.
-- **Providers:** Data source abstraction.
-  - `GithubReleaseProvider` (default) talks to GitHub API and assets.
-  - `MockReleaseProvider` (testing) serves releases from bundled JSON and produces minimal .app archives for offline testing. It ships in the separate `AppUpdaterMocks` product, so apps that only depend on `AppUpdater` don't bundle it or its JSON fixture.
-
-## Mock Provider & Testing
-
-Add `AppUpdaterMocks` as a dependency of your test target, then swap providers via initializer or at runtime:
+For a SwiftUI app, add the shared menu to the app's existing commands:
 
 ```swift
-import AppUpdater
-import AppUpdaterMocks
-
-let updater = AppUpdater(owner: "...", repo: "...", provider: GithubReleaseProvider())
-// or
-updater.provider = MockReleaseProvider()
-updater.skipCodeSignValidation = true // recommended when using mocks
+#if !APP_STORE
+CommandGroup(after: .appInfo) {
+    AppUpdateMenu(controller: appDelegate.updates)
+}
+#endif
 ```
 
-Mock data lives in `Sources/AppUpdaterMocks/Resources/Mocks/releases.mock.json`.
+For an AppKit menu-bar app, add `updates.menuItems()` to the menu when building it. The items target the controller and validate their enabled state automatically.
 
-### CLI Mock Runner
+Set `releasePrefix` only when the archive name differs from the repository name. GDSPlayer uses:
 
-Run the mock provider from the command line:
+```swift
+AppUpdateController(owner: "jorisnoo", repo: "GDSPlayer", releasePrefix: "GDS.FM")
+```
 
-```bash
+The controller owns persistence under `Application Support/<bundle identifier>/PendingUpdates` and the `deferredUpdate` UserDefaults key. Existing GDSPlayer deferred updates are restored automatically. Apps should not delete these files or duplicate the controller's callbacks.
+
+## Release requirements
+
+- macOS 12 or later; Swift 6 or later to build the package.
+- Non-sandboxed app in a writable installation directory.
+- Semantic release tags, such as `1.2.3` or `v1.2.3`.
+- Binary assets named `YourApp-1.2.3.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.tar.bz2`, or `.tgz`. Use the normalized version without `v` in the asset filename.
+- The archive contains one top-level `.app` bundle.
+- The downloaded app has the expected bundle identifier and satisfies the installed app's designated code-signing requirement. Sign releases consistently with Developer ID.
+- The bundle's `CFBundleShortVersionString` matches the release tag and is newer than the running app. `LSMinimumSystemVersion` must be compatible with the current macOS version.
+
+## Installation guarantees
+
+The package verifies sealed resources, nested code, and all architectures using Security.framework. It verifies the downloaded bundle again after copying it into a staging directory on the installation volume. An invalid signature, different app identity, or incompatible version stops installation before replacement.
+
+Replacement retains the source update and temporarily keeps a backup of the installed app. Restarting waits for launch confirmation; if launch reports failure, the old bundle is restored. Only a confirmed launch triggers success callbacks and termination. This confirms launch, not the subsequent health of the application.
+
+Install on quit uses the same validation and replacement, without launching another instance. If installation fails, the controller logs the failure, retains the pending update, and lets the user quit normally.
+
+Archive extraction uses macOS `bsdtar` with its default path protections, rejects traversal paths before extraction, and validates extracted symlinks. Child-process output is drained concurrently and extraction has a timeout.
+
+## Core API
+
+`AppUpdater` and its callbacks are main-actor isolated. `ReleaseProvider` implementations must be `Sendable`.
+
+```swift
+let updater = AppUpdater(owner: "yourname", repo: "YourApp", automaticallyChecks: false)
+try await updater.checkThrowing()
+
+switch updater.state {
+case .downloaded(_, _, let bundle):
+    try await updater.installThrowing(bundle)
+case .none:
+    // Already up to date or no usable release.
+    break
+case .newVersionDetected, .downloading:
+    break
+}
+```
+
+Concurrent checks await the same operation and receive its result. A failed check restores the previous state, records `lastError`, and releases the busy state for retry. `isChecking` and `isInstalling` are observable. Already-downloaded releases are reused while their files exist.
+
+For custom install-on-quit flows, `try await updater.replaceBundle(bundle)` replaces without relaunching and returns the installed app's URL. The source remains available. The caller owns its cleanup and termination reply.
+
+The callback-based `check` and `install` methods remain available. `onDownloadSuccess`/`onDownloadFail` are background-scheduler callbacks; explicit `check` calls use their supplied callbacks. Prefer the shared controller unless the app needs a different user experience.
+
+## Swift Package Manager
+
+Add the GitHub package and select its `AppUpdater` product:
+
+```swift
+.package(url: "https://github.com/jorisnoo/AppUpdater.git", from: "4.0.0")
+```
+
+In Xcode, use the same repository URL with **Up to Next Major Version**, starting at **4.0.0**. Batzen, Harvie, RealExporter, and GDSPlayer all use this remote dependency. A sibling package checkout is not required for local or CI builds.
+
+For package development, temporarily add this repository to an Xcode workspace as a local package override. Remove the override before verifying the released dependency.
+
+### Migrating from 3.x
+
+Use `AppUpdateController` and forward the app's launch and termination callbacks as shown above. Replace custom update menus with `AppUpdateMenu` or `menuItems()`. Remove app-owned deferred-update persistence and download/install callbacks; the controller handles them, including existing GDSPlayer saved updates.
+
+For custom core integrations, create and access `AppUpdater` on the main actor, make providers `Sendable`, and handle `.none` as a successful check. `replaceBundle` is async and retains the source bundle; the caller owns its cleanup. See the [changelog](CHANGELOG.md) for all breaking changes.
+
+## Tests and mocks
+
+```sh
+swift test
 swift run AppUpdaterMockRunner
 ```
 
-Shows state transitions and completes without touching your installed app.
+`AppUpdaterMocks` is a separate product. Tests can inject `MockReleaseProvider` and enable `skipCodeSignValidation` for placeholder bundles; do not enable it in shipping apps. The mock runner exercises checking, downloading, extraction, and state changes without installing anything.
 
-## Running Tests
+The regression suite covers concurrent checks, process output and timeouts, unsafe archives, signature tampering, persistence, deferred updates, install-on-quit ordering, and relaunch rollback.
 
-```bash
-swift test
-```
-
-The test suite covers version comparison, asset selection, download simulation, and provider behavior.
-
-## Debugging
-
-Use Console.app and filter by "AppUpdater" subsystem to see debug logs.
-
-## Alternatives
-
-* [Sparkle](https://github.com/sparkle-project/Sparkle)
-* [Squirrel](https://github.com/Squirrel/Squirrel.Mac)
-
-## References
-
-* [mxcl/AppUpdater](https://github.com/mxcl/AppUpdater) - Original implementation
-* [s1ntoneli/AppUpdater](https://github.com/s1ntoneli/AppUpdater) - Upstream fork with async/await rewrite
+For diagnostics, filter Console.app by the `AppUpdater` subsystem.

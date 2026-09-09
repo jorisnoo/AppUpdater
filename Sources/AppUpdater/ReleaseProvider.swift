@@ -1,6 +1,6 @@
 import Foundation
 
-public protocol ReleaseProvider {
+public protocol ReleaseProvider: Sendable {
     func fetchReleases(owner: String, repo: String) async throws -> [Release]
     func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error>
 }

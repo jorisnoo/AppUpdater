@@ -1,5 +1,25 @@
 # Changelog
 
+## [4.0.0] - 2026-09-09
+
+### Added
+- Shared `AppUpdateController` and `AppUpdateMenu` for launch/background checks, manual feedback, persisted updates, and installation on quit.
+- Regression coverage for tampering, concurrent checks, unsafe archives, persistence failures, and installation rollback.
+
+### Fixed
+- Verify the full signature against the installed app's designated requirement, including sealed resources, nested code, and every architecture. Validate bundle identity, version, and macOS compatibility.
+- Stage installation on the destination volume, retain pending files through installation, and restore the previous app if relaunch fails.
+- Drain subprocess output concurrently; enforce process timeouts and reject unsafe extraction paths.
+- Coalesce overlapping checks, retain ready updates after failures, and clear busy state reliably.
+- Persist updates atomically and preserve the previous update when copying fails.
+- Reject failed HTTP download responses and cancel downloads when their streams are cancelled.
+
+### Breaking
+- `AppUpdater` and its callbacks are main-actor isolated; `ReleaseProvider` now requires `Sendable`.
+- `Process.launching()` returns captured `Data` instead of undrained pipes.
+- `Bundle.codeSigningIdentity()` returns the signing team for diagnostics; installation uses Security.framework requirements.
+- `replaceBundle` returns the installed URL and retains the source bundle.
+
 ## [3.1.0] - 2026-07-11
 
 ### Breaking

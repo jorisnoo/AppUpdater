@@ -1,34 +1,62 @@
 import Foundation
 
 extension Process {
-    public func launching() async throws -> (out: Pipe, err: Pipe) {
+    /// Drains both streams concurrently so verbose child processes cannot fill a pipe.
+    public func launching(timeout: TimeInterval = 120) async throws -> (out: Data, err: Data) {
         let stdout = Pipe()
         let stderr = Pipe()
-
         standardOutput = stdout
         standardError = stderr
+        standardInput = FileHandle.nullDevice
 
-        try run()
-
-        return try await withCheckedThrowingContinuation { continuation in
-            terminationHandler = { [stdout, stderr] process in
-                guard process.terminationReason == .exit, process.terminationStatus == 0 else {
-                    let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
-                    let stderrData = stderr.fileHandleForReading.readDataToEndOfFile()
-                    let stdoutString = String(data: stdoutData, encoding: .utf8)
-                    let stderrString = String(data: stderrData, encoding: .utf8)
-
-                    continuation.resume(throwing: ProcessError.execution(
-                        process: process,
-                        standardOutput: stdoutString,
-                        standardError: stderrString
-                    ))
-                    return
-                }
-
-                continuation.resume(returning: (stdout, stderr))
-            }
+        let output = Task.detached { stdout.fileHandleForReading.readDataToEndOfFile() }
+        let errors = Task.detached { stderr.fileHandleForReading.readDataToEndOfFile() }
+        let timer = Task {
+            try await Task.sleep(nanoseconds: UInt64(timeout * 1_000_000_000))
+            if self.isRunning { self.terminate() }
         }
+        defer { timer.cancel() }
+
+        let status: Int32
+        do {
+            status = try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { continuation in
+                    terminationHandler = { process in
+                        continuation.resume(returning: process.terminationStatus)
+                    }
+                    do {
+                        try Task.checkCancellation()
+                        try run()
+                        try? stdout.fileHandleForWriting.close()
+                        try? stderr.fileHandleForWriting.close()
+                        if Task.isCancelled, isRunning { terminate() }
+                    } catch {
+                        terminationHandler = nil
+                        try? stdout.fileHandleForWriting.close()
+                        try? stderr.fileHandleForWriting.close()
+                        continuation.resume(throwing: error)
+                    }
+                }
+            } onCancel: {
+                if self.isRunning { self.terminate() }
+            }
+        } catch {
+            _ = await output.value
+            _ = await errors.value
+            throw error
+        }
+
+        let out = await output.value
+        let err = await errors.value
+        try Task.checkCancellation()
+        guard terminationReason == .exit, status == 0 else {
+            throw ProcessError.execution(
+                process: self,
+                standardOutput: String(data: out, encoding: .utf8),
+                standardError: String(data: err, encoding: .utf8)
+            )
+        }
+        return (out, err)
     }
 
     public enum ProcessError: Error {

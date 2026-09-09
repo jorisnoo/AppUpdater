@@ -43,16 +43,16 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         let assetName = asset.name
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
-            Task {
-                // Simulate progress
-                for i in 1...steps {
-                    try await Task.sleep(nanoseconds: delay)
-                    let fraction = Double(i) / Double(steps)
-                    continuation.yield(.progress(fractionCompleted: fraction))
-                }
-
-                // Materialize a mock zip at saveLocation if requested type is zip, otherwise tar
+            let task = Task {
                 do {
+                    // Simulate progress
+                    for i in 1...steps {
+                        try await Task.sleep(nanoseconds: delay)
+                        let fraction = Double(i) / Double(steps)
+                        continuation.yield(.progress(fractionCompleted: fraction))
+                    }
+
+                    // Materialize a mock zip at saveLocation if requested type is zip, otherwise tar
                     try await MockReleaseProvider.createMockArchive(at: saveLocation, assetName: assetName)
                     continuation.yield(.finished(saveLocation: saveLocation))
                     continuation.finish()
@@ -60,6 +60,7 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
                     continuation.finish(throwing: error)
                 }
             }
+            continuation.onTermination = { _ in task.cancel() }
         }
     }
 
@@ -102,11 +103,8 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
         // Archive
         if ext == "zip" {
             try await shellZip(contentsOf: tempDir, into: url)
-        } else if ext == "tar" {
-            try await shellTar(contentsOf: tempDir, into: url)
         } else {
-            // default to zip
-            try await shellZip(contentsOf: tempDir, into: url)
+            try await shellTar(contentsOf: tempDir, into: url)
         }
 
         // Cleanup tempDir
@@ -114,11 +112,15 @@ public final class MockReleaseProvider: ReleaseProvider, Sendable {
     }
 
     private static func shellZip(contentsOf dir: URL, into dst: URL) async throws {
+        // zip appends ".zip" to extensionless destinations; report the actual requested path.
+        let archive = dst.appendingPathExtension("zip")
+        defer { try? FileManager.default.removeItem(at: archive) }
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/zip")
         proc.currentDirectoryPath = dir.path
-        proc.arguments = ["-r", dst.path, "."]
+        proc.arguments = ["-r", archive.path, "."]
         let _ = try await proc.launching()
+        try FileManager.default.moveItem(at: archive, to: dst)
     }
 
     private static func shellTar(contentsOf dir: URL, into dst: URL) async throws {

@@ -79,7 +79,9 @@ final class MockReleaseProviderTests: XCTestCase {
             switch state {
             case .progress:
                 progressCount += 1
-            case .finished:
+            case .finished(let location):
+                XCTAssertEqual(location, saveLocation)
+                XCTAssertTrue(FileManager.default.fileExists(atPath: location.path))
                 finishCount += 1
             }
         }
