@@ -62,7 +62,7 @@ The controller owns persistence under `Application Support/<bundle identifier>/P
 
 - macOS 12 or later; Swift 6 or later to build the package.
 - Non-sandboxed app in a writable installation directory.
-- Semantic release tags, such as `1.2.3` or `v1.2.3`.
+- Semantic release tags, such as `1.2.3`.
 - Binary assets named `YourApp-1.2.3.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.tar.bz2`, or `.tgz`. Use the normalized version without `v` in the asset filename.
 - The archive contains one top-level `.app` bundle.
 - The downloaded app has the expected bundle identifier and satisfies the installed app's designated code-signing requirement. Sign releases consistently with Developer ID.
@@ -133,3 +133,7 @@ swift run AppUpdaterMockRunner
 The regression suite covers concurrent checks, process output and timeouts, unsafe archives, signature tampering, persistence, deferred updates, install-on-quit ordering, and relaunch rollback.
 
 For diagnostics, filter Console.app by the `AppUpdater` subsystem.
+
+## Maintainer releases
+
+See [RELEASING.md](RELEASING.md) for versioning, changelog entries and the release command.
