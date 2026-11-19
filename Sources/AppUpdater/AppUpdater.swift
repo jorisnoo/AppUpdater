@@ -33,6 +33,9 @@ public final class AppUpdater: ObservableObject {
     @Published public private(set) var isChecking = false
     @Published public private(set) var isInstalling = false
     private var checkTask: Task<Void, Swift.Error>?
+    private var stateBeforeCheck: UpdateState?
+    private var checksStopped = false
+    var savedBundle: ((Version, String) -> Bundle?)?
     var installedBundle = Bundle.main
     private var downloadDirectory: URL?
 
@@ -58,7 +61,7 @@ public final class AppUpdater: ObservableObject {
         if automaticallyChecks {
             activity.schedule { [weak self] completion in
                 Task { @MainActor in
-                    guard let self else { return completion(.finished) }
+                    guard let self, !self.checksStopped else { return completion(.finished) }
                     guard !self.activity.shouldDefer else { return completion(.deferred) }
                     do {
                         try await self.checkThrowing()
@@ -110,7 +113,6 @@ public final class AppUpdater: ObservableObject {
                 try await checkThrowing()
                 success?()
             } catch {
-                trace("check failed:", String(describing: error))
                 fail?(error)
             }
         }
@@ -128,6 +130,7 @@ public final class AppUpdater: ObservableObject {
     }
 
     public func checkThrowing() async throws {
+        guard !checksStopped else { throw CancellationError() }
         guard !isInstalling else { throw Error.installationInProgress }
         if let checkTask {
             try await checkTask.value
@@ -135,15 +138,22 @@ public final class AppUpdater: ObservableObject {
         }
         isChecking = true
         lastError = nil
-        let previousState = state
+        stateBeforeCheck = state
         let task = Task {
             defer {
-                self.checkTask = nil
-                self.isChecking = false
+                if !Task.isCancelled {
+                    self.checkTask = nil
+                    self.stateBeforeCheck = nil
+                    self.isChecking = false
+                }
             }
-            do { try await self.performCheck() }
-            catch {
-                self.state = previousState
+            do {
+                try await self.performCheck()
+                try Task.checkCancellation()
+            } catch {
+                guard !Task.isCancelled else { throw CancellationError() }
+                if let previous = self.stateBeforeCheck { self.state = previous }
+                self.traceFailure("Update check failed", error)
                 self.lastError = error
                 throw error
             }
@@ -152,15 +162,34 @@ public final class AppUpdater: ObservableObject {
         try await task.value
     }
 
+    // A saved installation must not be held up by a provider that ignores cancellation.
+    // Cancelled checks no longer own the observable state, even when they eventually return.
+    private func cancelCheck() {
+        guard let task = checkTask else { return }
+        task.cancel()
+        checkTask = nil
+        if let previous = stateBeforeCheck { state = previous }
+        stateBeforeCheck = nil
+        isChecking = false
+    }
+
+    func stopChecksForTermination() {
+        checksStopped = true
+        activity.invalidate()
+        cancelCheck()
+    }
+
     private func performCheck() async throws {
+        try Task.checkCancellation()
         trace("begin check for", slug)
         guard installedBundle.executableURL != nil else {
             throw Error.bundleExecutableURL
         }
-        let currentVersion = installedBundle.version
+        let currentVersion = installedBundle.updateVersion
 
         trace("fetch releases")
         let releases = try await provider.fetchReleases(owner: owner, repo: repo)
+        try Task.checkCancellation()
         trace("fetched releases count:", releases.count)
 
         notifyReleasesDidChange(releases)
@@ -176,10 +205,15 @@ public final class AppUpdater: ObservableObject {
            let executable = bundle.executableURL,
            FileManager.default.fileExists(atPath: executable.path) { return }
 
+        if let bundle = savedBundle?(release.tagName, asset.name) {
+            state = .downloaded(release, asset, bundle)
+            return
+        }
         trace("viable release:", release.tagName.description, "asset:", asset.name)
         notifyStateChanged(newState: .newVersionDetected(release, asset))
 
         let bundle = try await downloadAndExtract(asset: asset, release: release)
+        try Task.checkCancellation()
         notifyStateChanged(newState: .downloaded(release, asset, bundle))
     }
 
@@ -196,6 +230,7 @@ public final class AppUpdater: ObservableObject {
     private func downloadAndExtract(asset: Release.Asset, release: Release) async throws -> Bundle {
         trace("update start:", release.tagName.description, asset.name)
 
+        try validateInstallLocation()
         let tmpdir = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: installedBundle.bundleURL, create: true)
 
         var keepBundle = false
@@ -205,6 +240,7 @@ public final class AppUpdater: ObservableObject {
 
         var dst: URL? = nil
         for try await state in downloadState {
+            try Task.checkCancellation()
             switch state {
             case .progress(let fraction):
                 trace("downloading", Int(fraction * 100), "%")
@@ -215,12 +251,13 @@ public final class AppUpdater: ObservableObject {
             }
         }
 
+        try Task.checkCancellation()
         guard let dst = dst else {
             trace("download failed: destination missing")
             throw Error.downloadFailed
         }
 
-        guard let unziped = try await unzip(dst, contentType: asset.contentType) else {
+        guard let unziped = try await unzip(dst) else {
             trace("unzip failed")
             throw Error.unzipFailed
         }
@@ -230,6 +267,7 @@ public final class AppUpdater: ObservableObject {
         }
 
         if try await validateCodeSigning(installedBundle, downloadedAppBundle) {
+            try Task.checkCancellation()
             try validateVersion(downloadedAppBundle, expected: release.tagName)
             try? FileManager.default.removeItem(at: dst)
             discardTemporaryDownload()
@@ -247,15 +285,25 @@ public final class AppUpdater: ObservableObject {
         downloadDirectory = nil
     }
 
-    private func validateVersion(_ bundle: Bundle, expected: Version? = nil) throws {
+    private func validateInstallLocation() throws {
+        let parent = installedBundle.bundleURL.resolvingSymlinksInPath().deletingLastPathComponent()
+        guard !parent.pathComponents.contains("AppTranslocation"),
+              FileManager.default.isWritableFile(atPath: parent.path),
+              try parent.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly != true else {
+            throw InstallLocationError()
+        }
+    }
+
+    func validateVersion(_ bundle: Bundle, expected: Version? = nil) throws {
         guard let exe = bundle.executableURL,
               FileManager.default.isExecutableFile(atPath: exe.path) else {
             throw Error.invalidDownloadedBundle
         }
         // Mock archives deliberately contain a placeholder version and executable.
         guard !skipCodeSignValidation else { return }
-        guard bundle.updateVersion > installedBundle.version,
-              expected == nil || bundle.updateVersion == expected else { throw Error.incompatibleUpdate }
+        let candidate = bundle.updateVersion
+        guard (expected ?? candidate) > installedBundle.updateVersion,
+              expected.map({ candidate.matchesRelease($0) }) ?? true else { throw Error.incompatibleUpdate }
         if let minimum = bundle.object(forInfoDictionaryKey: "LSMinimumSystemVersion") as? String {
             let os = ProcessInfo.processInfo.operatingSystemVersion
             let running = "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)"
@@ -269,8 +317,9 @@ public final class AppUpdater: ObservableObject {
     /// Returns the installed application's URL.
     @discardableResult
     public func replaceBundle(_ bundle: Bundle) async throws -> URL? {
-        guard !isInstalling, !isChecking else { throw Error.installationInProgress }
+        guard !isInstalling else { throw Error.installationInProgress }
         isInstalling = true
+        cancelCheck()
         defer { isInstalling = false }
         let backup = try await replaceValidatedBundle(bundle)
         try? FileManager.default.removeItem(at: backup)
@@ -279,6 +328,7 @@ public final class AppUpdater: ObservableObject {
     }
 
     private func replaceValidatedBundle(_ bundle: Bundle) async throws -> URL {
+        try validateInstallLocation()
         try validateVersion(bundle)
         let destination = installedBundle.bundleURL
         let staging = try FileManager.default.url(for: .itemReplacementDirectory, in: .userDomainMask, appropriateFor: destination, create: true)
@@ -300,15 +350,22 @@ public final class AppUpdater: ObservableObject {
     }
 
     private func performInstallation(_ bundle: Bundle, success: OnSuccess?) async throws {
-        guard !isInstalling, !isChecking else { throw Error.installationInProgress }
+        guard !isInstalling else { throw Error.installationInProgress }
         isInstalling = true
+        cancelCheck()
         defer { isInstalling = false }
         let backup = try await replaceValidatedBundle(bundle)
         do {
             try await launchApplication(installedBundle.bundleURL)
-        } catch {
-            _ = try FileManager.default.replaceItemAt(installedBundle.bundleURL, withItemAt: backup, options: .usingNewMetadataOnly)
-            throw error
+        } catch let launchError {
+            do {
+                try restoreBackup(installedBundle.bundleURL, backup)
+            } catch {
+                let failure = RollbackError(launchError: launchError, rollbackError: error, backup: backup)
+                traceFailure("Could not restore application after failed relaunch", failure)
+                throw failure
+            }
+            throw launchError
         }
         try? FileManager.default.removeItem(at: backup)
         state = .none
@@ -318,6 +375,9 @@ public final class AppUpdater: ObservableObject {
     }
 
     // Internal seams let installation tests exercise rollback without launching or quitting apps.
+    var restoreBackup: (URL, URL) throws -> Void = { destination, backup in
+        _ = try FileManager.default.replaceItemAt(destination, withItemAt: backup, options: .usingNewMetadataOnly)
+    }
     var terminateApplication: () -> Void = { NSApp.terminate(nil) }
     var launchApplication: (URL) async throws -> Void = { url in
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Swift.Error>) in
@@ -381,19 +441,15 @@ public struct Release: Decodable, Sendable {
     }
 
     func viableAsset(forRelease releasePrefix: String) -> Asset? {
-        let prefix = "\(releasePrefix.lowercased())-\(tagName)"
+        let prefix = "\(releasePrefix)-\(tagName).".lowercased()
 
         return assets.first { asset in
             let name = asset.name.lowercased()
 
-            switch asset.contentType {
-            case .zip:
-                return name == "\(prefix).zip"
-            case .tar:
-                return [".tar", ".tar.gz", ".tar.xz", ".tar.bz2", ".tgz"]
-                    .contains { name == prefix + $0 }
-            case .unknown:
-                return false
+            guard name.hasPrefix(prefix) else { return false }
+            switch name.dropFirst(prefix.count) {
+            case "zip", "tar", "tar.gz", "tar.xz", "tar.bz2", "tgz": return true
+            default: return false
             }
         }
     }
@@ -440,12 +496,11 @@ extension Array where Element == Release {
     }
 }
 
-func unzip(_ url: URL, contentType: ContentType) async throws -> URL? {
+func unzip(_ url: URL) async throws -> URL? {
 
     let proc = Process()
     proc.currentDirectoryURL = url.deletingLastPathComponent()
 
-    guard contentType != .unknown else { throw AppUpdater.Error.unzipFailed }
     // macOS bsdtar reads both zip and tar. Its default extraction rejects writes
     // through symlinks and paths containing ".." (never enable -P).
     let listing = Process()
@@ -501,5 +556,26 @@ extension AppUpdater {
     func trace(_ items: Any...) {
         let msg = items.map { String(describing: $0) }.joined(separator: " ")
         Self.logger.debug("\(msg, privacy: .public)")
+    }
+
+    func traceFailure(_ operation: String, _ error: Swift.Error) {
+        let nsError = error as NSError
+        Self.logger.error("\(operation, privacy: .public): \(nsError.domain, privacy: .public) \(nsError.code) – \(error.localizedDescription, privacy: .private)")
+    }
+}
+
+struct InstallLocationError: LocalizedError {
+    var errorDescription: String? {
+        "Move this app to a writable Applications folder and reopen it before updating."
+    }
+}
+
+struct RollbackError: LocalizedError {
+    let launchError: Swift.Error
+    let rollbackError: Swift.Error
+    let backup: URL
+
+    var errorDescription: String? {
+        "Relaunch failed: \(launchError.localizedDescription) The previous app could not be restored: \(rollbackError.localizedDescription) Check for the backup at \(backup.path)."
     }
 }

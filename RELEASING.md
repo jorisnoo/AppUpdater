@@ -11,10 +11,13 @@ Release from `main` using an explicit version without a `v` prefix. `CHANGELOG.m
 Configured release checks:
 
 ```sh
-swift test
+swift test --force-resolved-versions
+python3 scripts/test_release.py
 ```
 
 Install the project’s normal dependencies first. The helper runs these checks when publishing; dry-run prints them without executing them. Run any additional checks needed for the changed behavior before committing.
+
+Require the **AppUpdater tests** GitHub Actions check on `main`. Every branch push and pull request runs both checks, including changes that touch only release tooling. Review dependency updates like other pull requests. Verify the proposed release commit is green before tagging it.
 
 ## Release
 

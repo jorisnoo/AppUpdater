@@ -61,20 +61,20 @@ The controller owns persistence under `Application Support/<bundle identifier>/P
 ## Release requirements
 
 - macOS 12 or later; Swift 6 or later to build the package.
-- Non-sandboxed app in a writable installation directory.
+- Non-sandboxed app in a writable installation directory. Move the app off its disk image or out of App Translocation and reopen it before updating.
 - Semantic release tags, such as `1.2.3`.
 - Binary assets named `YourApp-1.2.3.zip`, `.tar`, `.tar.gz`, `.tar.xz`, `.tar.bz2`, or `.tgz`. Use the normalized version without `v` in the asset filename.
 - The archive contains one top-level `.app` bundle.
 - The downloaded app has the expected bundle identifier and satisfies the installed app's designated code-signing requirement. Sign releases consistently with Developer ID.
-- The bundle's `CFBundleShortVersionString` matches the release tag and is newer than the running app. `LSMinimumSystemVersion` must be compatible with the current macOS version.
+- The bundle's `CFBundleShortVersionString` matches the release tag and is newer than the running app. `LSMinimumSystemVersion` must be compatible with the current macOS version. For a prerelease such as `1.3.0-beta.1`, a numeric short version of `1.3.0` is also accepted. To distinguish successive betas and the final release with the same numeric short version, set `AppUpdaterReleaseVersion` in the signed Info.plist to the full tag. Without it the installed numeric version ranks as the final release.
 
 ## Installation guarantees
 
 The package verifies sealed resources, nested code, and all architectures using Security.framework. It verifies the downloaded bundle again after copying it into a staging directory on the installation volume. An invalid signature, different app identity, or incompatible version stops installation before replacement.
 
-Replacement retains the source update and temporarily keeps a backup of the installed app. Restarting waits for launch confirmation; if launch reports failure, the old bundle is restored. Only a confirmed launch triggers success callbacks and termination. This confirms launch, not the subsequent health of the application.
+Replacement retains the source update and temporarily keeps a backup of the installed app. Restarting waits for launch confirmation; if launch reports failure, AppUpdater tries to restore the old bundle. If restoration also fails, the error reports both failures and the backup location for manual recovery. Only a confirmed launch triggers success callbacks and termination. This confirms launch, not the subsequent health of the application.
 
-Install on quit uses the same validation and replacement, without launching another instance. If installation fails, the controller logs the failure, retains the pending update, and lets the user quit normally.
+Install on quit uses the same validation and replacement, without launching another instance. Installing a saved update cancels an in-flight check rather than waiting for the network. If installation fails, the controller logs the failure, retains the pending update, and lets the user quit normally.
 
 Archive extraction uses macOS `bsdtar` with its default path protections, rejects traversal paths before extraction, and validates extracted symlinks. Child-process output is drained concurrently and extraction has a timeout.
 
@@ -132,7 +132,7 @@ swift run AppUpdaterMockRunner
 
 The regression suite covers concurrent checks, process output and timeouts, unsafe archives, signature tampering, persistence, deferred updates, install-on-quit ordering, and relaunch rollback.
 
-For diagnostics, filter Console.app by the `AppUpdater` subsystem.
+For diagnostics, filter Console.app by the `AppUpdater` subsystem. Failures use the error level; enable debug messages to see download progress.
 
 ## Maintainer releases
 

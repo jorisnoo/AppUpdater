@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Version
 @testable import AppUpdater
 import AppUpdaterMocks
 
@@ -12,7 +13,7 @@ final class UpdateReliabilityTests: XCTestCase {
         return url
     }
 
-    private func bundle(in directory: URL, name: String = "Review", version: String = "1.0.0", identifier: String = "test.appupdater.review") throws -> Bundle {
+    private func bundle(in directory: URL, name: String = "Review", version: String = "1.0.0", identifier: String = "test.appupdater.review", releaseVersion: String? = nil) throws -> Bundle {
         let url = directory.appendingPathComponent(name + ".app")
         let macOS = url.appendingPathComponent("Contents/MacOS")
         let resources = url.appendingPathComponent("Contents/Resources")
@@ -20,8 +21,9 @@ final class UpdateReliabilityTests: XCTestCase {
         try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/echo"), to: macOS.appendingPathComponent("Review"))
         try Data(version.utf8).write(to: resources.appendingPathComponent("version.txt"))
-        let info = ["CFBundleIdentifier": identifier, "CFBundleExecutable": "Review", "CFBundlePackageType": "APPL",
+        var info = ["CFBundleIdentifier": identifier, "CFBundleExecutable": "Review", "CFBundlePackageType": "APPL",
                     "CFBundleShortVersionString": version, "CFBundleVersion": version, "CFBundleName": "Review"]
+        info["AppUpdaterReleaseVersion"] = releaseVersion
         try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
             .write(to: url.appendingPathComponent("Contents/Info.plist"))
         return try XCTUnwrap(Bundle(url: url))
@@ -120,6 +122,69 @@ final class UpdateReliabilityTests: XCTestCase {
         XCTAssertFalse(updater.isInstalling)
     }
 
+    func testRollbackFailureReportsBothErrorsAndRetainsBackup() async throws {
+        let root = try temporaryDirectory()
+        let installed = try bundle(in: root)
+        let update = try bundle(in: root, name: "Candidate", version: "2.0.0")
+        let updater = updater(installed: installed)
+        updater.skipCodeSignValidation = true
+        updater.launchApplication = { _ in throw AppUpdater.Error.relaunchFailed }
+        updater.restoreBackup = { _, _ in throw CocoaError(.fileWriteNoPermission) }
+        updater.terminateApplication = { XCTFail("Must not quit") }
+        do {
+            try await updater.installThrowing(update)
+            XCTFail("Expected rollback failure")
+        } catch let failure as RollbackError {
+            XCTAssertEqual(failure.launchError.localizedDescription, AppUpdater.Error.relaunchFailed.localizedDescription)
+            XCTAssertEqual((failure.rollbackError as NSError).code, CocoaError.fileWriteNoPermission.rawValue)
+            XCTAssertTrue(failure.localizedDescription.contains(failure.backup.path))
+            XCTAssertTrue(FileManager.default.fileExists(atPath: failure.backup.path))
+        }
+        XCTAssertEqual(installed.updateVersion.description, "2.0.0")
+        XCTAssertFalse(updater.isInstalling)
+    }
+
+    func testPrereleaseValidatesNumericMarketingVersionWithoutAcceptingWrongRelease() throws {
+        let root = try temporaryDirectory()
+        let installed = try bundle(in: root)
+        let numeric = try bundle(in: root, name: "Candidate", version: "2.0.0")
+        let first = try XCTUnwrap(Version("2.0.0-beta.1"))
+        let next = try XCTUnwrap(Version("2.0.0-beta.2"))
+        let updater = updater(installed: installed)
+        XCTAssertNoThrow(try updater.validateVersion(numeric, expected: first))
+        XCTAssertThrowsError(try updater.validateVersion(numeric, expected: Version(2, 1, 0)))
+        let tagged = try bundle(in: root, name: "Tagged", version: "2.0.0", releaseVersion: first.description)
+        XCTAssertThrowsError(try updater.validateVersion(tagged, expected: next))
+        updater.installedBundle = tagged
+        XCTAssertThrowsError(try updater.validateVersion(tagged, expected: first))
+        XCTAssertNoThrow(try updater.validateVersion(numeric, expected: Version(2, 0, 0)))
+    }
+
+    func testTranslocatedInstallIsRejectedBeforeDownloading() async throws {
+        let root = try temporaryDirectory()
+        let installed = try bundle(in: root.appendingPathComponent("AppTranslocation/ABC/d"))
+        let updater = AppUpdater(owner: "test", repo: "AppUpdaterExample", provider: MetadataOnlyProvider(), automaticallyChecks: false)
+        updater.installedBundle = installed
+        do {
+            try await updater.checkThrowing()
+            XCTFail("Expected location error")
+        } catch is InstallLocationError { }
+    }
+
+    func testUnwritableParentIsRejectedBeforeDownloading() async throws {
+        let root = try temporaryDirectory()
+        let installed = try bundle(in: root)
+        let updater = AppUpdater(owner: "test", repo: "AppUpdaterExample", provider: MetadataOnlyProvider(), automaticallyChecks: false)
+        updater.installedBundle = installed
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: root.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path) }
+        try XCTSkipIf(FileManager.default.isWritableFile(atPath: root.path), "Privileged process bypasses directory permissions")
+        do {
+            try await updater.checkThrowing()
+            XCTFail("Expected location error")
+        } catch is InstallLocationError { }
+    }
+
     func testSuccessfulInstallKeepsSourceUntilSuccessCallback() async throws {
         let root = try temporaryDirectory()
         let installed = try bundle(in: root)
@@ -137,7 +202,13 @@ final class UpdateReliabilityTests: XCTestCase {
             events.append("success")
         }
         updater.terminateApplication = { events.append("terminate") }
+        let provider = GatedProvider()
+        updater.provider = provider
+        let check = Task { try await updater.checkThrowing() }
+        while await provider.calls == 0 { await Task.yield() }
         try await updater.installThrowing(update)
+        await provider.finish()
+        do { try await check.value; XCTFail("Install should supersede check") } catch is CancellationError { }
         XCTAssertEqual(events, ["launch", "success", "terminate"])
         XCTAssertFalse(updater.isInstalling)
     }
@@ -199,8 +270,13 @@ final class UpdateReliabilityTests: XCTestCase {
         XCTAssertNotNil(controller.pendingUpdate?.loadBundle())
         XCTAssertNotNil(updater.lastError)
         if case .downloaded = updater.state { } else { XCTFail("Ready state must survive failure") }
-        let restored = AppUpdateController(updater: updater, defaults: defaults, directory: directory, automaticChecks: false)
-        XCTAssertNotNil(restored.pendingUpdate)
+        let relaunched = AppUpdater(owner: "test", repo: "AppUpdaterExample", provider: MetadataOnlyProvider(), automaticallyChecks: false)
+        relaunched.installedBundle = installed
+        let restored = AppUpdateController(updater: relaunched, defaults: defaults, directory: directory, automaticChecks: false)
+        let saved = try XCTUnwrap(restored.pendingUpdate?.bundlePath)
+        try await relaunched.checkThrowing()
+        guard case .downloaded(_, _, let reused) = relaunched.state else { return XCTFail("Expected restored update") }
+        XCTAssertEqual(reused.bundlePath, saved)
     }
 
     func testInstallOnQuitReplacesBeforeCleaningUpAndRepliesOnce() async throws {
@@ -228,9 +304,19 @@ final class UpdateReliabilityTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: directory.path))
             replied.fulfill()
         }
+        let provider = GatedProvider()
+        updater.provider = provider
+        let check = Task { try await updater.checkThrowing() }
+        while await provider.calls == 0 { await Task.yield() }
         XCTAssertEqual(controller.applicationShouldTerminate(application), .terminateLater)
         XCTAssertEqual(controller.applicationShouldTerminate(application), .terminateCancel)
         await fulfillment(of: [replied], timeout: 5)
+        // Quit has already been approved even though this provider has not returned.
+        XCTAssertEqual(controller.applicationShouldTerminate(application), .terminateNow)
+        do { try await updater.checkThrowing(); XCTFail("No new check during termination") } catch is CancellationError { }
+        await provider.finish()
+        do { try await check.value; XCTFail("Old check should be cancelled") } catch is CancellationError { }
+        XCTAssertNil(updater.lastError)
     }
 
     func testOutdatedDeferredUpdateIsDiscardedOnLaunch() async throws {
@@ -271,7 +357,7 @@ final class UpdateReliabilityTests: XCTestCase {
         append.currentDirectoryURL = source
         append.arguments = ["-rf", archive.path, "escape/payload"]
         _ = try await append.launching()
-        do { _ = try await unzip(archive, contentType: .tar); XCTFail("Unsafe archive must fail") } catch { }
+        do { _ = try await unzip(archive); XCTFail("Unsafe archive must fail") } catch { }
         XCTAssertFalse(FileManager.default.fileExists(atPath: outside.appendingPathComponent("payload").path))
     }
 }
@@ -285,6 +371,17 @@ private actor GatedProvider: ReleaseProvider {
     }
     func finish() { continuation?.resume(returning: []); continuation = nil }
     func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        throw AppUpdater.Error.downloadFailed
+    }
+}
+
+private struct MetadataOnlyProvider: ReleaseProvider {
+    func fetchReleases(owner: String, repo: String) async throws -> [Release] {
+        try await MockReleaseProvider().fetchReleases(owner: owner, repo: repo)
+    }
+
+    func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        XCTFail("A download was not expected")
         throw AppUpdater.Error.downloadFailed
     }
 }

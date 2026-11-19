@@ -29,7 +29,10 @@ extension Bundle {
               let info = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any],
               let raw = info["CFBundleShortVersionString"] as? String,
               let version = Version(tolerant: raw) else { return .null }
-        return version
+        // An optional signed tag distinguishes beta builds sharing one numeric marketing version.
+        guard let tag = info["AppUpdaterReleaseVersion"] as? String else { return version }
+        guard let release = Version(tolerant: tag), version.matchesRelease(release) else { return .null }
+        return release
     }
 
     private static var validationFlags: SecCSFlags {
@@ -57,5 +60,12 @@ extension Bundle {
               SecStaticCodeCheckValidity(downloaded, validationFlags, requirement) == errSecSuccess else {
             throw AppUpdater.Error.codeSigningIdentity
         }
+    }
+}
+
+extension Version {
+    func matchesRelease(_ release: Version) -> Bool {
+        self == release || (prereleaseIdentifiers.isEmpty && !release.prereleaseIdentifiers.isEmpty &&
+            major == release.major && minor == release.minor && patch == release.patch)
     }
 }

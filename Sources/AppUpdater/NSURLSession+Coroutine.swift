@@ -1,19 +1,8 @@
 import Foundation
 
 extension URLSession {
-    func dataTask(with convertible: URLRequestConvertible) async throws -> URLTaskResult? {
-        return try await withCheckedThrowingContinuation { continuation in
-            dataTask(with: convertible.request) { data, response, err in
-                guard let data, let response else {
-                    continuation.resume(throwing: err ?? AUError.invalidCallingConvention)
-                    return
-                }
-                continuation.resume(returning: URLTaskResult(data: data, response: response))
-            }.resume()
-        }
-    }
-
     func downloadTask(with convertible: URLRequestConvertible, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {
+        try Task.checkCancellation()
         let request = convertible.request
 
         return AsyncThrowingStream<DownloadingState, Error> { continuation in
@@ -37,7 +26,7 @@ extension URLSession {
                 }
             }
 
-            let observation = task.progress.observe(\.fractionCompleted) { progress, _ in
+            let observation = task.progress.observe(\.fractionCompleted, options: [.initial, .new]) { progress, _ in
                 continuation.yield(.progress(fractionCompleted: progress.fractionCompleted))
             }
 

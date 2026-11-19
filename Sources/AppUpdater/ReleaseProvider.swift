@@ -6,9 +6,17 @@ public protocol ReleaseProvider: Sendable {
 }
 
 public struct GithubReleaseProvider: ReleaseProvider, Sendable {
-    private let session: URLSession
+    @usableFromInline
+    static let defaultSession: URLSession = {
+        let configuration = URLSessionConfiguration.default
+        // Unlike the request (idle) timeout, this also bounds a continually trickling download.
+        configuration.timeoutIntervalForResource = 15 * 60
+        return URLSession(configuration: configuration)
+    }()
 
-    public init(session: URLSession = .shared) {
+    let session: URLSession
+
+    public init(session: URLSession = GithubReleaseProvider.defaultSession) {
         self.session = session
     }
 
@@ -18,10 +26,10 @@ public struct GithubReleaseProvider: ReleaseProvider, Sendable {
         guard let url = URL(string: urlString) else {
             throw AppUpdater.Error.invalidURL(urlString)
         }
-        guard let task = try await session.dataTask(with: url)?.validate() else {
-            throw AUError.invalidCallingConvention
-        }
-        return try JSONDecoder().decode([Release].self, from: task.data)
+        let (data, response) = try await session.data(from: url)
+        try Task.checkCancellation()
+        let result = try URLTaskResult(data: data, response: response).validate()
+        return try JSONDecoder().decode([Release].self, from: result.data)
     }
 
     public func download(asset: Release.Asset, to saveLocation: URL) async throws -> AsyncThrowingStream<DownloadingState, Error> {

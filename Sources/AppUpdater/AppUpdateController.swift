@@ -39,12 +39,14 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
         self.automaticChecks = automaticChecks
         super.init()
         restorePendingUpdate()
+        updater.savedBundle = { [weak self] version, assetName in
+            guard let pending = self?.pendingUpdate,
+                  pending.releaseVersion == version.description, pending.assetName == assetName else { return nil }
+            return pending.loadBundle()
+        }
         updater.onDownloadSuccess = { [weak self] in
             do { try self?.saveDownloadedUpdate() }
-            catch { self?.updater.trace("Could not save update:", error) }
-        }
-        updater.onDownloadFail = { [weak self] error in
-            self?.updater.trace("Automatic update check failed:", error)
+            catch { self?.updater.traceFailure("Could not save update", error) }
         }
         updater.onInstallSuccess = { [weak self] in
             self?.clearPendingUpdate()
@@ -86,7 +88,7 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
     }
 
     @objc public func restartAndUpdate() {
-        guard !isPresenting, !updater.isChecking, !updater.isInstalling, !terminating else { return }
+        guard !isPresenting, !updater.isInstalling, !terminating else { return }
         isPresenting = true
         Task {
             defer { isPresenting = false }
@@ -95,6 +97,7 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
     }
 
     private func installPendingUpdate() async {
+        guard !terminating else { return }
         guard let bundle = pendingUpdate?.loadBundle() else {
             clearPendingUpdate()
             showMessage("Update Unavailable", "Please check for updates again.", warning: true)
@@ -110,12 +113,9 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
         if terminating || updater.isInstalling { return .terminateCancel }
         guard pendingUpdate != nil else { return .terminateNow }
         terminating = true
+        updater.stopChecksForTermination()
         Task {
-            defer { terminating = false }
             do {
-                // An automatic check may be replacing the saved update. Finish it first.
-                if updater.isChecking { try? await updater.checkThrowing() }
-                try saveDownloadedUpdate()
                 if let bundle = pendingUpdate?.loadBundle() {
                     try await updater.replaceBundle(bundle)
                     clearPendingUpdate()
@@ -123,14 +123,16 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
                     clearPendingUpdate()
                 }
             } catch {
-                updater.trace("Install on quit failed; retaining pending update:", error)
+                updater.traceFailure("Install on quit failed; retaining pending update", error)
             }
+            allowsTermination = true
             sender.reply(toApplicationShouldTerminate: true)
         }
         return .terminateLater
     }
 
     func saveDownloadedUpdate() throws {
+        guard !terminating, !updater.isInstalling else { return }
         guard case .downloaded(let release, let asset, let bundle) = updater.state else { return }
         let saved = try DeferredUpdate.persistBundle(bundle, to: directory)
         let pending = DeferredUpdate(bundlePath: saved.path, releaseVersion: release.tagName.description,
@@ -152,8 +154,8 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
               let bundle = pending.loadBundle(),
               bundle.bundleIdentifier == updater.installedBundle.bundleIdentifier,
               let version = Version(tolerant: pending.releaseVersion),
-              version > updater.installedBundle.version,
-              bundle.updateVersion == version else {
+              version > updater.installedBundle.updateVersion,
+              bundle.updateVersion.matchesRelease(version) else {
             clearPendingUpdate()
             return
         }
@@ -197,7 +199,8 @@ public final class AppUpdateController: NSObject, ObservableObject, NSMenuItemVa
     }
 
     public func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-        !updater.isChecking && !updater.isInstalling && !isPresenting && !terminating
+        !updater.isInstalling && !isPresenting && !terminating &&
+            (menuItem.action == #selector(restartAndUpdate) || !updater.isChecking)
     }
 }
 
@@ -215,10 +218,11 @@ public struct AppUpdateMenu: View {
     public var body: some View {
         Group {
             Button(updater.isChecking ? "Checking for Updates…" : "Check for Updates…", action: controller.checkForUpdates)
+                .disabled(updater.isChecking)
             if controller.pendingUpdate != nil {
                 Button("Restart and Update", action: controller.restartAndUpdate)
             }
         }
-        .disabled(updater.isChecking || updater.isInstalling || controller.isPresenting)
+        .disabled(updater.isInstalling || controller.isPresenting)
     }
 }

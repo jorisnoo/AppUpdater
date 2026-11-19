@@ -159,13 +159,13 @@ final class ReleaseTests: XCTestCase {
         XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
     }
 
-    func testViableAssetIgnoresUnknownContentType() throws {
+    func testViableAssetAcceptsUnknownContentTypeForArchive() throws {
         let release = makeRelease(
             tag: "1.0.0",
             assets: [(name: "MyApp-1.0.0.zip", contentType: "application/octet-stream")]
         )
 
-        XCTAssertNil(release.viableAsset(forRelease: "MyApp"))
+        XCTAssertEqual(release.viableAsset(forRelease: "MyApp")?.name, "MyApp-1.0.0.zip")
     }
 
     func testViableAssetIgnoresWrongPrefix() throws {

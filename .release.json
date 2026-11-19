@@ -5,7 +5,12 @@
   "checks": [
     [
       "swift",
-      "test"
+      "test",
+      "--force-resolved-versions"
+    ],
+    [
+      "python3",
+      "scripts/test_release.py"
     ]
   ]
 }

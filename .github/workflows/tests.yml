@@ -2,13 +2,24 @@ name: Tests
 
 on:
   push:
-    branches: [main, develop]
+    branches: ['**']
   pull_request:
-    branches: [main]
+
+permissions:
+  contents: read
 
 jobs:
   test:
-    runs-on: macos-latest
+    name: AppUpdater tests
+    runs-on: macos-15
+    timeout-minutes: 20
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
     steps:
-      - uses: actions/checkout@v4.4.0
-      - run: swift test
+      - uses: actions/checkout@v7.0.1
+        with:
+          persist-credentials: false
+      - name: Run Swift package tests with locked dependencies
+        run: swift test --force-resolved-versions
+      - name: Run release helper tests
+        run: python3 scripts/test_release.py

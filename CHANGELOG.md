@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.1.0] - 2026-11-19
+
+### Added
+- Prerelease tags now support numeric marketing versions. An optional `AppUpdaterReleaseVersion` Info.plist key distinguishes betas and final releases that share a marketing version.
+
+### Fixed
+- Reuse a saved download after relaunch. Restart Now and install-on-quit install the saved copy without waiting for an active network check.
+- Accept supported archive filenames regardless of the server's MIME type. Detect a translocated or read-only install before downloading and tell the user where to move the app.
+- Record background failures at error level. If both relaunch and rollback fail, report both errors and the backup location.
+
 ## [4.0.0] - 2026-09-09
 
 ### Added
